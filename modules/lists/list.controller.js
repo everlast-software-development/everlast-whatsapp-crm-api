@@ -1,5 +1,7 @@
 const prisma = require("../../config/prisma");
 const AppError = require("../../utils/AppError");
+const logAudit = require("../../utils/audit");
+const { applySuppressions } = require("../../utils/optOutSuppression");
 const {
   normalizeImportPhone,
   parseGender,
@@ -112,6 +114,7 @@ const createList = async (req, res, next) => {
     const list = await prisma.contactList.create({
       data: { name: name.trim(), description: description?.trim() || null, createdById: req.user.id },
     });
+    logAudit({ action: "list.created", actor: req.user, targetType: "ContactList", targetId: list.id, details: { name: list.name } });
     res.status(201).json({ success: true, data: { ...list, memberCount: 0 } });
   } catch (err) {
     next(err);
@@ -184,6 +187,7 @@ const updateList = async (req, res, next) => {
     if (description !== undefined) data.description = description?.trim() || null;
 
     const list = await prisma.contactList.update({ where: { id }, data });
+    logAudit({ action: "list.updated", actor: req.user, targetType: "ContactList", targetId: id, details: { fields: Object.keys(data), name: list.name } });
     res.status(200).json({ success: true, data: list });
   } catch (err) {
     if (err.code === "P2025") return next(new AppError("List not found", 404));
@@ -194,7 +198,8 @@ const updateList = async (req, res, next) => {
 const deleteList = async (req, res, next) => {
   try {
     const id = parseInt(req.params.id);
-    await prisma.contactList.delete({ where: { id } }); // ListMember rows cascade
+    const list = await prisma.contactList.delete({ where: { id } }); // ListMember rows cascade
+    logAudit({ action: "list.deleted", actor: req.user, targetType: "ContactList", targetId: id, details: { name: list.name } });
     res.status(200).json({ success: true, message: "List deleted" });
   } catch (err) {
     if (err.code === "P2025") return next(new AppError("List not found", 404));
@@ -220,6 +225,10 @@ const addMembers = async (req, res, next) => {
     const result = await prisma.listMember.createMany({
       data: parsed.map((customerId) => ({ listId, customerId })),
       skipDuplicates: true,
+    });
+    logAudit({
+      action: "list.members_added", actor: req.user, targetType: "ContactList", targetId: listId,
+      details: { name: list.name, added: result.count, alreadyInList: parsed.length - result.count },
     });
     res.status(200).json({
       success: true,
@@ -258,6 +267,7 @@ const removeMember = async (req, res, next) => {
     const listId = parseInt(req.params.id);
     const customerId = parseInt(req.params.customerId);
     await prisma.listMember.delete({ where: { listId_customerId: { listId, customerId } } });
+    logAudit({ action: "list.member_removed", actor: req.user, targetType: "ContactList", targetId: listId, details: { customerId } });
     res.status(200).json({ success: true, message: "Removed from list" });
   } catch (err) {
     if (err.code === "P2025") return next(new AppError("That contact isn't in this list", 404));
@@ -302,6 +312,8 @@ const importListMembers = async (req, res, next) => {
     let createdIds = [];
     if (plan.toCreate.length > 0) {
       await prisma.customer.createMany({ data: plan.toCreate, skipDuplicates: true });
+      // Contacts deleted while opted out come back opted out.
+      await applySuppressions(plan.toCreate.map((d) => d.phone));
       const created = await prisma.customer.findMany({
         where: { phone: { in: plan.toCreate.map((d) => d.phone) } },
         select: { id: true },
@@ -323,6 +335,10 @@ const importListMembers = async (req, res, next) => {
       });
       linked = result.count;
     }
+    logAudit({
+      action: "list.imported", actor: req.user, targetType: "ContactList", targetId: listId,
+      details: { name: list.name, total: plan.total, created: createdIds.length, linked, invalid: plan.invalid.length },
+    });
 
     res.status(200).json({
       success: true,

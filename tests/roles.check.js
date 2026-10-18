@@ -45,6 +45,7 @@ const ENDPOINTS = [
   ["POST", `/api/campaigns/${NOPE}/submit`, "campaign:write"],
   ["POST", `/api/campaigns/${NOPE}/refresh-audience`, "campaign:write"],
   ["POST", "/api/campaigns/test-send", "campaign:write"],
+  ["GET", "/api/campaigns/test-phones", "campaign:write"],
   ["POST", `/api/campaigns/${NOPE}/approve`, "campaign:send"],
   ["POST", `/api/campaigns/${NOPE}/reject`, "campaign:send"],
   ["POST", `/api/campaigns/${NOPE}/send`, "campaign:send"],
@@ -59,6 +60,7 @@ const ENDPOINTS = [
   ["GET", "/api/settings", "settings:write"],
   ["PUT", "/api/settings/quietHours", "settings:write"],
   ["PUT", "/api/settings/campaignSafety", "settings:write"],
+  ["PUT", "/api/settings/testPhones", "settings:write"],
   ["GET", "/api/settings/numbers", "number:write"],
   ["POST", "/api/settings/numbers", "number:write"],
   ["PUT", `/api/settings/numbers/${NOPE}`, "number:write"],
@@ -133,6 +135,8 @@ const ENDPOINTS = [
   ["POST", "/api/media/upload", "media:upload"],
   // reporting
   ["GET", "/api/stats/overview", "stats:read"],
+  // availability is "any of" (conversation:read or campaign:read), which this
+  // one-permission table can't express — not listed.
   // team
   ["GET", "/api/users", "user:read"],
   // The agent picker's list — open to anyone who can assign, which includes
@@ -150,7 +154,7 @@ const ENDPOINTS = [
 let pass = 0, fail = 0;
 const failures = [];
 
-function request(port, method, urlPath, token) {
+function request(port, method, urlPath, token, { csrf = true } = {}) {
   return new Promise((resolve, reject) => {
     const body = method === "GET" || method === "DELETE" ? null : "{}";
     const req = http.request(
@@ -158,6 +162,8 @@ function request(port, method, urlPath, token) {
         host: "127.0.0.1", port, method, path: urlPath,
         headers: {
           Authorization: `Bearer ${token}`,
+          // The CSRF header lib/api.ts sends on every call (middleware/csrf.js).
+          ...(csrf ? { "X-Requested-With": "XMLHttpRequest" } : {}),
           ...(body ? { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) } : {}),
         },
       },
@@ -235,6 +241,17 @@ async function main() {
       }
       if (rowOk) pass++; else fail++;
       console.log(`${rowOk ? G + "PASS" : R + "FAIL"}${RESET} ${method.padEnd(6)} ${urlPath.padEnd(48)} ${D}${perm.padEnd(20)} ${row.join("  ")}${RESET}`);
+    }
+
+    // CSRF: a state-changing call without the header is refused even for an admin.
+    const csrfStatus = await request(port, "POST", "/api/lists", tokens.ADMIN, { csrf: false });
+    if (csrfStatus === 403) {
+      pass++;
+      console.log(`${G}PASS${RESET} POST without X-Requested-With is refused (CSRF)`);
+    } else {
+      fail++;
+      failures.push(`POST /api/lists without X-Requested-With: expected 403, got ${csrfStatus}`);
+      console.log(`${R}FAIL${RESET} POST without X-Requested-With is refused (CSRF)`);
     }
   } finally {
     await prisma.user.deleteMany({ where: { id: { in: created } } });

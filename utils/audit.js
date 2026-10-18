@@ -13,4 +13,9 @@ const logAudit = ({ action, actor, targetType, targetId, details }) => {
   }).catch((err) => console.error("Audit log failed:", err.message));
 };
 
+// Audit details never hold a full phone number (or a message body): the last
+// four digits are enough to tell entries apart.
+const maskPhone = (phone) => (phone ? `…${String(phone).slice(-4)}` : null);
+
 module.exports = logAudit;
+module.exports.maskPhone = maskPhone;

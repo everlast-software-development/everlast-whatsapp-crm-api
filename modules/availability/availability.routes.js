@@ -1,13 +1,14 @@
 const express = require("express");
 const protect = require("../../middleware/auth");
-const requirePermission = require("../../middleware/permissions");
+const { requireAnyPermission } = require("../../middleware/permissions");
 const { getDays, getDay, checkSlot, parseText } = require("./availability.controller");
 
 const router = express.Router();
 
-// The clinic's free times aren't tied to a WhatsApp line. conversation:read is
-// held by everyone who either builds flows or works booking requests.
-router.use(protect, requirePermission("conversation:read"));
+// The clinic's free times aren't tied to a WhatsApp line. Open to whoever works
+// booking requests (conversation:read) or can read flows, whose simulator
+// shows free times (campaign:read — flows have no permissions of their own).
+router.use(protect, requireAnyPermission("conversation:read", "campaign:read"));
 
 router.get("/days", getDays);
 router.get("/day", getDay);

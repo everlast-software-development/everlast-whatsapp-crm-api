@@ -2,6 +2,7 @@ const prisma = require("../../config/prisma");
 const AppError = require("../../utils/AppError");
 const logAudit = require("../../utils/audit");
 const { emitToNumber } = require("../../utils/socket");
+const { liftSuppression } = require("../../utils/optOutSuppression");
 
 // Agents record a patient's opt-out from the chat (the patient said "don't
 // send me offers" on a call, in person, or in their own words). Two scopes:
@@ -15,7 +16,7 @@ const SCOPES = ["line", "all"];
 async function loadConversation(req) {
   const conversation = await prisma.conversation.findFirst({
     where: { id: parseInt(req.params.id), whatsappNumberId: req.numberId },
-    include: { customer: { select: { id: true, optedOut: true } } },
+    include: { customer: { select: { id: true, optedOut: true, phone: true } } },
   });
   if (!conversation) throw new AppError("Conversation not found", 404);
   return conversation;
@@ -87,6 +88,11 @@ const liftOptOut = async (req, res, next) => {
       if (!conversation.customer.optedOut) return next(new AppError("This patient isn't opted out of all lines", 404));
       await prisma.customer.update({ where: { id: conversation.customerId }, data: { optedOut: false } });
     }
+    // The opt-out remembered for this phone (from a deleted contact) goes too.
+    await liftSuppression(
+      conversation.customer.phone,
+      scope === "line" ? { whatsappNumberId: conversation.whatsappNumberId } : { global: true },
+    );
     logAudit({
       action: "CUSTOMER_OPTED_IN",
       actor: req.user,

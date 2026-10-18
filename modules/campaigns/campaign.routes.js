@@ -20,6 +20,7 @@ const {
   approveCampaign,
   rejectCampaign,
   testSendTemplate,
+  getTestPhones,
   refreshCampaignAudience,
   setCampaignFlow,
   getCampaignCapacity,
@@ -32,14 +33,17 @@ router.use(protect, resolveNumber());
 
 // Permission model: role x status, not role alone.
 //
-//   An AGENT may build and submit — create a DRAFT, edit or delete a DRAFT
-//   they created, test-send it, and hand it over for review. The controller
-//   enforces the ownership and stage rules, since they depend on the row.
+//   Whoever holds campaign:write but not campaign:send (today: MARKETING;
+//   agents have no campaign permissions) may build and submit — create a
+//   DRAFT, edit or delete a DRAFT, attach a flow while it's a DRAFT, test-send
+//   to the staff test numbers, and hand it over for review. The controller
+//   enforces the stage rules, since they depend on the row.
 //
-//   Only an ADMIN may authorize a send: approve, reject, send directly,
-//   schedule, pause, resume, cancel, or bulk-delete. Approving is itself the
-//   send authorization, so a campaign is frozen to agents from
-//   PENDING_APPROVAL onward and its recipient list can't change after review.
+//   Only an ADMIN (campaign:send) may authorize a send: approve, reject, send
+//   directly or schedule. Pausing, cancelling and bulk-delete are
+//   campaign:control. Approving is itself the send authorization, so a
+//   campaign is frozen from PENDING_APPROVAL onward and its recipient list
+//   and flow can't change after review.
 
 // ── Reads: open, so the inbox has campaign context for a reply ─────────────
 router.get("/", requirePermission("campaign:read"), getCampaigns);
@@ -54,9 +58,11 @@ router.get("/pending-approval", requirePermission("campaign:send"), getPendingAp
 // Must come before "/:id" so "bulk-delete" isn't captured as an :id param.
 router.post("/bulk-delete", requirePermission("campaign:control"), bulkDeleteCampaigns);
 // Likewise "test-send" — it takes no campaign id, it sends one template to one
-// number. Open to agents: building a campaign you can't preview is the problem
-// this exists to solve. Every call is audited.
+// number. Open to campaign builders: building a campaign you can't preview is
+// the problem this exists to solve. Only to the staff test numbers in
+// Settings → Campaign safety, rate-limited, and every call is audited.
 router.post("/test-send", requirePermission("campaign:write"), testSendTemplate);
+router.get("/test-phones", requirePermission("campaign:write"), getTestPhones);
 
 // Flow builder (campaign automations). Before "/:id" so "flows" isn't an id.
 router.use("/flows", require("../flows/flow.routes"));
@@ -66,7 +72,7 @@ router.get("/:id/replies", requirePermission("campaign:read"), getCampaignReplie
 // Meta daily messaging limit vs. what this campaign still needs.
 router.get("/:id/capacity", requirePermission("campaign:read"), getCampaignCapacity);
 
-// ── Building: agent-accessible, stage-checked in the controller ────────────
+// ── Building: campaign:write, stage-checked in the controller ──────────────
 router.post("/", requirePermission("campaign:write"), createCampaign);
 router.put("/:id", requirePermission("campaign:write"), updateCampaign);
 router.put("/:id/flow", requirePermission("campaign:write"), setCampaignFlow);

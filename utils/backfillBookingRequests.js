@@ -38,7 +38,7 @@ async function main() {
 }
 
 main().catch(async (err) => {
-  console.error(err);
+  console.error(require("./safeError")(err));
   await prisma.$disconnect();
   process.exit(1);
 });

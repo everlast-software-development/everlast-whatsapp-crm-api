@@ -5,6 +5,7 @@ const logAudit = require("../../utils/audit");
 const { ROLES, roleHasPermission } = require("../../config/permissions");
 const { disconnectUser } = require("../../utils/socket");
 const { handOver, hasHistory } = require("../../utils/handOver");
+const { issueAuthCookie } = require("../auth/auth.controller");
 
 // Taken from the permission table rather than typed out here. This list was
 // once hard-coded to ADMIN and AGENT, which silently made MARKETING impossible
@@ -135,7 +136,12 @@ const updateUser = async (req, res, next) => {
         return next(new AppError("You can't deactivate your own account", 400));
       }
       data.isActive = Boolean(isActive);
-      if (!data.isActive) data.status = "OFFLINE";
+      // Also retires every token they hold, so reactivating them later doesn't
+      // bring an old session back to life.
+      if (!data.isActive) {
+        data.status = "OFFLINE";
+        data.tokenVersion = { increment: 1 };
+      }
     }
     const losesInbox =
       (data.isActive === false && before.isActive) ||
@@ -153,12 +159,13 @@ const updateUser = async (req, res, next) => {
     // Signed out everywhere at once when deactivated or their role changed.
     if (data.isActive === false || (data.role && data.role !== before.role)) disconnectUser(targetId);
 
+    const { tokenVersion: _tv, ...changed } = data;
     logAudit({
       action: "user.updated",
       actor: req.user,
       targetType: "user",
       targetId: user.id,
-      details: { ...data, ...(handedOver ? { handedOver } : {}) },
+      details: { ...changed, ...(handedOver ? { handedOver } : {}) },
     });
 
     res.status(200).json({ success: true, data: user, handedOver });
@@ -176,11 +183,13 @@ const resetPassword = async (req, res, next) => {
     if (!password || password.length < 8) return next(new AppError("Password must be at least 8 characters", 400));
 
     const passwordHash = await bcryptjs.hash(password, 12);
+    // tokenVersion: every session they had is signed out.
     const user = await prisma.user.update({
       where: { id: parseInt(req.params.id) },
-      data: { passwordHash },
+      data: { passwordHash, tokenVersion: { increment: 1 } },
       select: SAFE_SELECT,
     });
+    disconnectUser(user.id);
 
     logAudit({
       action: "user.password_reset",
@@ -348,7 +357,18 @@ const changeMyPassword = async (req, res, next) => {
     if (!isMatch) return next(new AppError("Current password is incorrect", 400, "WRONG_PASSWORD"));
 
     const passwordHash = await bcryptjs.hash(newPassword, 12);
-    await prisma.user.update({ where: { id: req.user.id }, data: { passwordHash } });
+    // Signs out every other session (another browser, a lost phone). This tab
+    // gets a fresh cookie carrying the new version so it stays signed in; its
+    // socket is dropped with the rest and reconnects with that cookie.
+    const updated = await prisma.user.update({
+      where: { id: req.user.id },
+      data: { passwordHash, tokenVersion: { increment: 1 } },
+      select: { id: true, username: true, role: true, tokenVersion: true },
+    });
+    issueAuthCookie(res, updated);
+    disconnectUser(updated.id);
+
+    logAudit({ action: "user.password_changed", actor: req.user, targetType: "user", targetId: req.user.id, details: null });
 
     res.status(200).json({ success: true, message: "Password changed successfully" });
   } catch (err) {

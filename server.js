@@ -64,5 +64,5 @@ process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
 
 process.on("unhandledRejection", (reason) => {
-  console.error("Unhandled Promise Rejection:", reason);
+  console.error("Unhandled Promise Rejection:", require("./utils/safeError")(reason));
 });

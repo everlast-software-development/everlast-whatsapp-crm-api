@@ -2,7 +2,7 @@ const prisma = require("../../config/prisma");
 const { workingMinutesBetween } = require("../../utils/workingTime");
 const { getQuietHoursConfig, localMinuteOfDay } = require("../../utils/quietHours");
 const { SLA_MINUTES, responseTimes } = require("./supervision.controller");
-const { readPeriod } = require("./report.controller");
+const { readPeriod, teamRoles } = require("./report.controller");
 
 // The separate, detailed reports (Bookings, Team, Campaigns, Chats). Each takes
 // ?from=YYYY-MM-DD&to=YYYY-MM-DD (clinic time zone, both days included, max 92
@@ -155,7 +155,7 @@ const getTeamReport = async (req, res, next) => {
     const msgLine = period.numberId ? { conversation: { whatsappNumberId: period.numberId } } : {};
 
     const [users, staffMsgs, patientMsgs, waits, outcomeEvents, notes, requests, bookings, assignedNow] = await Promise.all([
-      prisma.user.findMany({ where: { role: { in: ["AGENT", "SUPERVISOR", "ADMIN"] } }, select: { id: true, name: true, username: true, role: true, isActive: true } }),
+      prisma.user.findMany({ where: { role: { in: teamRoles(req.user) } }, select: { id: true, name: true, username: true, role: true, isActive: true } }),
       prisma.message.findMany({ where: { createdAt: inPeriod, senderType: "AGENT", senderId: { not: null }, deletedAt: null, ...msgLine }, select: { conversationId: true, senderId: true, createdAt: true } }),
       prisma.message.findMany({ where: { createdAt: inPeriod, senderType: "CUSTOMER", deletedAt: null, ...msgLine }, select: { conversationId: true, createdAt: true } }),
       responseTimes(period.from, line, period.to),

@@ -39,7 +39,7 @@ const protect = async (req, res, next) => {
   // the common path to a single cheap read.
   const fresh = await prisma.user.findUnique({
     where: { id: decoded.id },
-    select: { id: true, username: true, role: true, isActive: true, lastActiveAt: true },
+    select: { id: true, username: true, role: true, isActive: true, lastActiveAt: true, tokenVersion: true },
   });
 
   // findUnique returns null where update() threw P2025: the account was
@@ -47,6 +47,13 @@ const protect = async (req, res, next) => {
   if (!fresh) {
     res.clearCookie("token", COOKIE_OPTIONS);
     return next(new AppError("Your account no longer exists", 401, "ACCOUNT_DELETED"));
+  }
+
+  // A password change or reset bumps tokenVersion, which retires every token
+  // issued before it. Tokens from before `tv` existed count as version 0.
+  if ((decoded.tv ?? 0) !== fresh.tokenVersion) {
+    res.clearCookie("token", COOKIE_OPTIONS);
+    return next(new AppError("Your session has ended — please sign in again", 401, "TOKEN_REVOKED"));
   }
 
   // Presence only needs minute-level accuracy, so one write per user per

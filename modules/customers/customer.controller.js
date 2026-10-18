@@ -3,6 +3,8 @@ const AppError = require("../../utils/AppError");
 const { emitToNumber } = require("../../utils/socket");
 const { roleHasPermission } = require("../../config/permissions");
 const logAudit = require("../../utils/audit");
+const { maskPhone } = require("../../utils/audit");
+const { rememberOptOuts, applySuppressions, liftSuppression } = require("../../utils/optOutSuppression");
 const { buildCustomerWhere, validateDefinition } = require("../../utils/segmentFilter");
 const {
   normalizeImportPhone,
@@ -185,7 +187,7 @@ const createCustomer = async (req, res, next) => {
     const existing = await prisma.customer.findUnique({ where: { phone } });
     if (existing) return next(new AppError("Customer with this phone already exists", 409));
 
-    const customer = await prisma.customer.create({
+    let customer = await prisma.customer.create({
       data: {
         name,
         phone,
@@ -199,6 +201,17 @@ const createCustomer = async (req, res, next) => {
         tags: Array.isArray(tags) ? tags : [],
         notes: notes || null,
       },
+    });
+    // A contact deleted while opted out comes back opted out.
+    if (await applySuppressions([customer.phone])) {
+      customer = await prisma.customer.findUnique({ where: { id: customer.id } });
+    }
+    logAudit({
+      action: "customer.created",
+      actor: req.user,
+      targetType: "Customer",
+      targetId: customer.id,
+      details: { phone: maskPhone(customer.phone), optedOut: customer.optedOut },
     });
     res.status(201).json({ success: true, data: customer });
   } catch (err) {
@@ -251,8 +264,9 @@ const updateCustomer = async (req, res, next) => {
     if (tags !== undefined) data.tags = Array.isArray(tags) ? tags : [];
     if (notes !== undefined) data.notes = notes;
     let optOutChange = null;
+    let before = null;
     if (optedOut !== undefined) {
-      const before = await prisma.customer.findUnique({ where: { id }, select: { optedOut: true } });
+      before = await prisma.customer.findUnique({ where: { id }, select: { optedOut: true, phone: true } });
       if (before && before.optedOut !== Boolean(optedOut)) {
         // Anyone may record an opt-out; only an admin may take one back.
         if (!optedOut && !roleHasPermission(req.user.role, "optout:lift")) {
@@ -275,7 +289,20 @@ const updateCustomer = async (req, res, next) => {
         targetId: id,
         details: { source: "MANUAL", scope: "all", via: "contact edit" },
       });
+      // Lifted: a remembered global opt-out for this phone goes too.
+      if (optOutChange === false) {
+        await liftSuppression(before.phone, { global: true }).catch((err) =>
+          console.error("Opt-out suppression lift failed:", err.message),
+        );
+      }
     }
+    logAudit({
+      action: "customer.updated",
+      actor: req.user,
+      targetType: "Customer",
+      targetId: id,
+      details: { fields: Object.keys(data), phone: maskPhone(customer.phone) },
+    });
     res.status(200).json({ success: true, data: customer });
 
     // Their chats show the name in the inbox list and chat header: refresh
@@ -322,11 +349,26 @@ const importCustomers = async (req, res, next) => {
     const plan = await buildImportPlan(rows, req.body?.dateFormat, req.body?.defaultCountry);
 
     let created = 0;
+    let suppressed = 0;
     if (plan.toCreate.length > 0) {
       const result = await prisma.customer.createMany({ data: plan.toCreate, skipDuplicates: true });
       created = result.count;
+      // Contacts deleted while opted out come back opted out.
+      suppressed = await applySuppressions(plan.toCreate.map((d) => d.phone));
     }
     const otherSkipped = plan.toCreate.length - created; // e.g. chart-number conflicts
+
+    // One entry per import, with the counts — never the rows.
+    logAudit({
+      action: "customer.imported",
+      actor: req.user,
+      targetType: "Customer",
+      targetId: 0,
+      details: {
+        total: plan.total, created, duplicates: plan.duplicates.length, invalid: plan.invalid.length,
+        otherSkipped, optOutsRestored: suppressed,
+      },
+    });
 
     res.status(200).json({
       success: true,
@@ -364,16 +406,29 @@ async function recountAfterDelete(campaigns) {
   }
 }
 
+// Deleting a contact deletes their whole chat history (ADMIN only). Their
+// opt-outs are remembered by phone first, so re-adding them can't make them
+// messageable again.
 const deleteCustomer = async (req, res, next) => {
   try {
     const id = parseInt(req.params.id);
+    const target = await prisma.customer.findUnique({ where: { id }, select: { id: true, phone: true } });
+    if (!target) return next(new AppError("Customer not found", 404));
+    await rememberOptOuts([id]);
     const affected = await campaignsOf([id]);
-    await prisma.$transaction([
+    const [messages, conversations] = await prisma.$transaction([
       prisma.message.deleteMany({ where: { conversation: { customerId: id } } }),
       prisma.conversation.deleteMany({ where: { customerId: id } }),
       prisma.campaignRecipient.deleteMany({ where: { customerId: id } }),
       prisma.customer.delete({ where: { id } }),
     ]);
+    logAudit({
+      action: "customer.deleted",
+      actor: req.user,
+      targetType: "Customer",
+      targetId: id,
+      details: { phone: maskPhone(target.phone), conversations: conversations.count, messages: messages.count },
+    });
     await recountAfterDelete(affected);
     res.status(200).json({ success: true, message: "Customer deleted" });
   } catch (err) {
@@ -395,6 +450,7 @@ const bulkDeleteCustomers = async (req, res, next) => {
     if (parsed.length === 0) return next(new AppError("No valid customer ids provided", 400));
     if (parsed.length > 5000) return next(new AppError("Cannot delete more than 5000 customers per request", 400));
 
+    await rememberOptOuts(parsed);
     const affected = await campaignsOf(parsed);
     const results = await prisma.$transaction([
       prisma.message.deleteMany({ where: { conversation: { customerId: { in: parsed } } } }),
@@ -403,6 +459,15 @@ const bulkDeleteCustomers = async (req, res, next) => {
       prisma.customer.deleteMany({ where: { id: { in: parsed } } }),
     ]);
     const deleted = results[results.length - 1].count;
+    logAudit({
+      action: "customer.bulk_deleted",
+      actor: req.user,
+      targetType: "Customer",
+      targetId: 0,
+      // Ids, not phones: thousands of (even masked) numbers say nothing more
+      // and bloat the log.
+      details: { requested: parsed.length, deleted, conversations: results[1].count, messages: results[0].count, ids: parsed.slice(0, 200) },
+    });
     await recountAfterDelete(affected);
     res.status(200).json({ success: true, message: `Deleted ${deleted} customer(s)`, data: { deleted } });
   } catch (err) {

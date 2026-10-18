@@ -12,9 +12,9 @@
 //
 // Splitting principle, so the vocabulary doesn't sprawl: split a resource into
 // two permissions only when (a) the roles' grants actually differ, or (b) it's a
-// plausible future attachment point for an approval gate. That's why
-// contact:delete and contact:bulk_delete are separate (MARKETING gets one, not
-// the other) and why campaign:send is separate from campaign:write (an approval
+// plausible future attachment point for an approval gate. contact:delete and
+// contact:bulk_delete are both ADMIN-only today (deleting a contact deletes
+// their whole chat history) but stay separate names; campaign:send is separate from campaign:write (an approval
 // gate would attach there) — but template:write covers create/update/delete/
 // submit/sync as one, because ADMIN and MARKETING get all five and nobody else
 // gets any.
@@ -91,16 +91,14 @@ const ROLE_PERMISSIONS = {
   ADMIN: "*",
 
   MARKETING: [
-    // Read only. GET /api/stats/conversations already returns stalled
-    // conversations and potential leads with customer data, so denying this
-    // while granting stats:read would protect nothing. Note the Inbox nav item
-    // and the /chats pages gate on conversation:write, not this — that keeps
-    // marketing out of the inbox and stops them 403ing on the auto-fired
-    // mark-as-read every time they open a conversation.
-    "conversation:read",
-    // No contact:bulk_delete — wiping the contact database is irreversible and
-    // admin-shaped. Single-contact delete covers hygiene.
-    "contact:read", "contact:write", "contact:import", "contact:delete",
+    // No conversation:read — marketing never sees patient chats: no inbox, no
+    // message search, no inbox socket room (utils/socket.js), and the stalled /
+    // lead lists in GET /api/stats/conversations come back empty for them.
+    // Campaign results and live campaign progress stay available.
+    //
+    // No contact:delete / contact:bulk_delete — deleting a contact deletes their
+    // whole chat history, so both are ADMIN only.
+    "contact:read", "contact:write", "contact:import",
     "list:read", "list:write",
     // The segmentation engine is this role's core tool: defining who a campaign
     // goes to is the job. Granting write here is what stops "audience" being an
@@ -113,7 +111,8 @@ const ROLE_PERMISSIONS = {
     "campaign:read", "campaign:write", "campaign:control",
     "media:read", "media:write",
     "user:read", // agent names for reporting filters; user:write stays ADMIN
-    "stats:read", "audit:read", "number:read", "number:use_any",
+    // No audit:read — the audit log is ADMIN only.
+    "stats:read", "number:read", "number:use_any",
   ],
 
   // An agent who also manages the agents. Everything an agent does, plus the
@@ -206,10 +205,16 @@ const roleHasPermission = (role, permission) =>
 const isKnownRole = (role) =>
   Object.prototype.hasOwnProperty.call(ROLE_PERMISSIONS, role);
 
+// The wildcard role. For the few rules that are about *who outranks whom*
+// rather than what a call does (a supervisor can't hand over an admin's
+// chats, admins are left out of a supervisor's team lists).
+const isAdminRole = (role) => ROLE_PERMISSIONS[role] === "*";
+
 module.exports = {
   ALL_PERMISSIONS,
   ROLES,
   permissionsFor,
   roleHasPermission,
   isKnownRole,
+  isAdminRole,
 };

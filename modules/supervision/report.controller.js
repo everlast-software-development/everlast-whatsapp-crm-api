@@ -1,4 +1,5 @@
 const prisma = require("../../config/prisma");
+const { isAdminRole } = require("../../config/permissions");
 const AppError = require("../../utils/AppError");
 const { workingMinutesBetween } = require("../../utils/workingTime");
 const { getQuietHoursConfig, localMinuteOfDay } = require("../../utils/quietHours");
@@ -15,6 +16,10 @@ const MAX_DAYS = 92;
 const MAX_CHATS = 2000;
 const MAX_TRANSCRIPTS = 100;
 const MAX_MESSAGES_PER_CHAT = 300;
+
+// Who appears in the per-person lists. Admins see everyone; a supervisor sees
+// the team they supervise, not the admins.
+const teamRoles = (viewer) => (isAdminRole(viewer.role) ? ["AGENT", "SUPERVISOR", "ADMIN"] : ["AGENT", "SUPERVISOR"]);
 
 // Midnight of a YYYY-MM-DD day in the clinic's time zone.
 function localMidnight(ymd) {
@@ -66,7 +71,7 @@ const getReport = async (req, res, next) => {
         where: { action: "conversation.outcome_set", createdAt: inPeriod, targetType: "conversation" },
         select: { actorId: true, details: true, targetId: true },
       }),
-      prisma.user.findMany({ where: { role: { in: ["AGENT", "SUPERVISOR", "ADMIN"] } }, select: { id: true, name: true, username: true, role: true, isActive: true } }),
+      prisma.user.findMany({ where: { role: { in: teamRoles(req.user) } }, select: { id: true, name: true, username: true, role: true, isActive: true } }),
       prisma.campaign.findMany({
         where: { deletedAt: null, startedAt: inPeriod, ...lineWhere },
         select: { id: true, name: true, status: true, startedAt: true, totalRecipients: true, sentCount: true, failedCount: true, whatsappNumber: { select: { label: true } } },
@@ -274,4 +279,4 @@ const getTranscripts = async (req, res, next) => {
   }
 };
 
-module.exports = { getReport, getTranscripts, localMidnight, readPeriod };
+module.exports = { getReport, getTranscripts, localMidnight, readPeriod, teamRoles };

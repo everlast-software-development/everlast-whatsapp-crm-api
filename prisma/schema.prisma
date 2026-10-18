@@ -245,6 +245,20 @@ model CustomerOptOut {
   @@index([whatsappNumberId])
 }
 
+// Opt-outs remembered by phone number, so deleting a contact never erases
+// them: a contact created or imported again with the same phone gets its
+// opt-outs back. Written when an opted-out contact is deleted; cleared when
+// an admin lifts the opt-out.
+model OptOutSuppression {
+  phone     String   @id
+  // Opted out of every line (Customer.optedOut).
+  global    Boolean  @default(false)
+  // Lines opted out of (CustomerOptOut rows), with their source.
+  lines     Json     @default("[]")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
 model User {
   id                    Int            @id @default(autoincrement())
   name                  String?
@@ -255,6 +269,9 @@ model User {
   // (ONLINE/OFFLINE/ON_BREAK). A user with isActive=false is rejected by
   // `protect` on their next request and cannot log in at all.
   isActive              Boolean        @default(true)
+  // Bumped on password change/reset: every login issued before it stops
+  // working (the JWT carries the version it was issued with).
+  tokenVersion          Int            @default(0)
   status                AgentStatus    @default(OFFLINE)
   lastActiveAt          DateTime?
   createdAt             DateTime       @default(now())

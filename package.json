@@ -8,6 +8,7 @@
     "dev": "nodemon server.js",
     "tunnel": "ngrok http --url=kate-nonrecurent-mui.ngrok-free.dev 8000",
     "seed": "node utils/seedUsers.js",
+    "create-admin": "node utils/createAdmin.js",
     "check:segments": "node tests/segments.check.js",
     "check:segments:fixture": "node tests/segments.fixture.check.js",
     "wa:number": "node utils/registerWhatsappNumber.js",
@@ -52,5 +53,8 @@
   },
   "devDependencies": {
     "nodemon": "^3.1.14"
+  },
+  "engines": {
+    "node": "22.x"
   }
 }

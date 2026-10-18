@@ -5,6 +5,8 @@ const { fetchAndStoreMediaWithRetry } = require("../../utils/whatsappMedia");
 const { emitToNumber } = require("../../utils/socket");
 const numbers = require("../../utils/whatsappNumbers");
 const logAudit = require("../../utils/audit");
+const safeError = require("../../utils/safeError");
+const { applySuppressions, liftSuppression } = require("../../utils/optOutSuppression");
 const { attributeReply } = require("../../utils/campaignAttribution");
 const flowEngine = require("../../utils/flowEngine");
 const { patientWroteData } = require("../../utils/followUp");
@@ -198,6 +200,7 @@ const handleUserPreferences = async (value) => {
       const { count } = await prisma.customerOptOut.deleteMany({
         where: { customerId: customer.id, whatsappNumberId: number.id, source: "WHATSAPP" },
       });
+      await liftSuppression(customer.phone, { whatsappNumberId: number.id, sources: ["WHATSAPP"] });
       if (count) {
         console.log(`Webhook: customer ${customer.id} resumed marketing via WhatsApp`);
         logAudit({
@@ -500,11 +503,17 @@ const processChangePayload = async (body) => {
     // Use upsert to avoid race condition when two webhooks arrive simultaneously for the same customer
     // The WhatsApp profile name ("Mom ❤️", a nickname) only fills an empty name:
     // a name the team typed or imported (chart name) is never overwritten.
+    const isNew = !(await prisma.customer.findUnique({ where: { phone }, select: { id: true } }));
     let customer = await prisma.customer.upsert({
       where: { phone },
       update: {},
       create: { phone, name },
     });
+    // A patient whose contact was deleted while opted out writes in again:
+    // their opt-outs come back with the new contact.
+    if (isNew && (await applySuppressions([phone]))) {
+      customer = await prisma.customer.findUnique({ where: { id: customer.id } });
+    }
     if (!customer.name && name) {
       customer = await prisma.customer.update({ where: { id: customer.id }, data: { name } });
     }
@@ -537,6 +546,7 @@ const processChangePayload = async (body) => {
         where: { customerId: customer.id, whatsappNumberId: number.id, source: { in: ["KEYWORD", "WHATSAPP"] } },
       });
       console.log("Webhook: customer", customer.id, count ? "opted IN to" : "sent START (no self opt-out to lift) on", number.label);
+      await liftSuppression(phone, { whatsappNumberId: number.id, sources: ["KEYWORD", "WHATSAPP"] });
       if (count) {
         logAudit({
           action: "CUSTOMER_OPTED_IN",
@@ -676,7 +686,7 @@ const processChangePayload = async (body) => {
     console.log("Webhook: done ✓");
   } catch (err) {
     console.error("=== WEBHOOK PROCESSING ERROR ===");
-    console.error(err);
+    console.error(safeError(err));
     // Re-thrown so the saved event stays unprocessed and recovery retries it.
     throw err;
   }

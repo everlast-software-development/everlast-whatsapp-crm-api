@@ -1,5 +1,6 @@
 const crypto = require("crypto");
 const AppError = require("../utils/AppError");
+const safeError = require("../utils/safeError");
 
 // Prisma connection-level failures. protect() now awaits a database read on
 // every request, so a database outage would otherwise surface as a wall of
@@ -51,9 +52,10 @@ const errorHandler = (err, req, res, next) => {
   else message = `Something went wrong on our side. Reference: ${requestId}`;
 
   if (statusCode >= 500) {
-    // The whole error, stack included — this is the only place it is recorded.
+    // Message, code and stack — this is the only place it is recorded. Never
+    // the raw error: an axios error's config holds the Meta access token.
     console.error(`[${requestId}] ${statusCode} ${req.method} ${req.originalUrl} — ${who}`);
-    console.error(err);
+    console.error(safeError(err));
   } else if (prismaMapped) {
     // Expected often enough to be noise as an error, but worth a trace.
     console.warn(`[${requestId}] ${statusCode} ${req.method} ${req.originalUrl} — ${who} — Prisma ${err.code}`);

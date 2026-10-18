@@ -1,11 +1,12 @@
 const express = require("express");
 const cors = require("cors");
 const cookieParser = require("cookie-parser");
-const rateLimit = require("express-rate-limit");
+const { rateLimit, ipKeyGenerator } = require("express-rate-limit");
 const helmet = require("helmet");
 const swaggerUi = require("swagger-ui-express");
 const swaggerSpec = require("./config/swagger");
 const errorHandler = require("./middleware/errorHandler");
+const csrfGuard = require("./middleware/csrf");
 
 const app = express();
 
@@ -26,29 +27,41 @@ app.use(cors({
   // and discards any response that arrives after a switch, so without this the
   // whole stale-response guard silently does nothing.
   exposedHeaders: ["X-WhatsApp-Number-Id"],
+  // allowedHeaders is left unset on purpose: the cors package then reflects
+  // whatever the preflight asks for, which includes the X-Requested-With CSRF
+  // header (middleware/csrf.js) — but only for FRONTEND_URL's origin.
 }));
 app.use(cookieParser());
 app.use(express.json({
   verify: (req, res, buf) => { req.rawBody = buf; },
 }));
 
-// Rate limiter for auth endpoints — prevents brute-force attacks
-const authLimiter = rateLimit({
+// Login brute-force guard, on POST /api/auth/login only (logout and the
+// session check are never limited). Keyed by IP + username so one person
+// mistyping can't lock out a whole clinic behind one office IP, and only
+// failures count — a successful sign-in doesn't use up the allowance.
+const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 20,
-  message: { success: false, message: "Too many requests, please try again later" },
+  max: 10,
+  skipSuccessfulRequests: true,
+  keyGenerator: (req) => `${ipKeyGenerator(req.ip)}|${String(req.body?.username || "").toLowerCase().slice(0, 40)}`,
+  message: { success: false, message: "Too many failed sign-in attempts. Please wait 15 minutes and try again." },
   standardHeaders: true,
   legacyHeaders: false,
 });
 
-// Rate limiter for webhook — prevents flood attacks while allowing Meta retries
-const webhookLimiter = rateLimit({
-  windowMs: 60 * 1000, // 1 minute
-  max: 300,
-  message: { success: false, message: "Too many webhook requests" },
+// Looser per-IP cap across all usernames, against password spraying.
+const loginIpLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  message: { success: false, message: "Too many sign-in attempts from this network. Please try again later." },
   standardHeaders: true,
   legacyHeaders: false,
 });
+
+// No limiter on /api/webhooks: POSTs are gated by Meta's HMAC signature, and
+// a burst of statuses after a campaign send would otherwise be dropped (Meta
+// retries, but late). The GET verify handshake only answers a correct token.
 
 // Only expose API docs outside production — they describe every endpoint and
 // shouldn't be publicly browsable on the live server.
@@ -58,7 +71,14 @@ if (process.env.NODE_ENV !== "production") {
   }));
 }
 
-app.use("/api/auth", authLimiter, require("./modules/auth/auth.routes"));
+// For the host's health check (Railway): the process is up and serving.
+app.get("/health", (req, res) => res.status(200).json({ ok: true }));
+
+// CSRF header check on every state-changing /api call except webhooks.
+app.use("/api", csrfGuard);
+
+app.post("/api/auth/login", loginIpLimiter, loginLimiter);
+app.use("/api/auth", require("./modules/auth/auth.routes"));
 app.use("/api/users", require("./modules/users/user.routes"));
 app.use("/api/customers", require("./modules/customers/customer.routes"));
 app.use("/api/lists", require("./modules/lists/list.routes"));
@@ -67,7 +87,7 @@ app.use("/api/conversations", require("./modules/conversations/conversation.rout
 app.use("/api/messages", require("./modules/messages/message.routes"));
 app.use("/api/media", require("./modules/media/media.routes"));
 app.use("/api/media-library", require("./modules/media-library/mediaLibrary.routes"));
-app.use("/api/webhooks", webhookLimiter, require("./modules/webhooks/webhook.routes"));
+app.use("/api/webhooks", require("./modules/webhooks/webhook.routes"));
 app.use("/api/audit", require("./modules/audit/audit.routes"));
 app.use("/api/stats", require("./modules/stats/stats.routes"));
 app.use("/api/templates", require("./modules/templates/template.routes"));

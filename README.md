@@ -24,8 +24,41 @@ Node.js + Express backend for managing WhatsApp customer conversations. Agents r
 npm install
 # fill in config.env with your credentials
 npm run dev        # starts on port 8000
-npm run seed       # creates the default admin account
+npm run seed       # demo accounts, one per role (development only — refuses NODE_ENV=production)
 ```
+
+---
+
+## Deploying (Railway)
+
+`railway.json` already builds (`prisma generate`), runs **`npx prisma migrate deploy` as the pre-deploy step**, health-checks `/health`, and pins **one replica** — keep it at one: socket rooms, the campaign sender's in-process state, the login / test-send rate limits and the settings cache all live in memory.
+
+**Backend variables**
+
+| Variable | Notes |
+|---|---|
+| `DATABASE_URL` | Neon connection string |
+| `JWT_SECRET` | Long random string (e.g. `openssl rand -hex 48`). Changing it signs everyone out |
+| `PORT` | Set by Railway — don't set it yourself |
+| `NODE_ENV` | `production` (secure cookies, no `/api-docs`, no `/api/dev`; the server warns loudly on Railway without it) |
+| `FRONTEND_URL` | The frontend's exact origin, e.g. `https://crm.example.com` (CORS + sockets) |
+| `COOKIE_SAMESITE` | `lax` when app and API share a site (`crm.example.com` + `api.example.com`); `none` when they're on different sites (two `*.up.railway.app` addresses) |
+| `WHATSAPP_VERIFY_TOKEN`, `WHATSAPP_APP_SECRET` | Meta app-level: webhook verify token and signature secret |
+| `WHATSAPP_TOKEN_*` / `WHATSAPP_ACCESS_TOKEN` | One access token per WhatsApp number, named by that number's `tokenEnvKey` |
+| `STORAGE_PROVIDER` + `CLOUDINARY_*` or `R2_*` | Media storage (`cloudinary` default; `r2` needs `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME`, `R2_PUBLIC_URL`) |
+| `N8N_CLINIC_DASHBOARD_URL`, `N8N_WEBHOOK_SECRET` | Optional — the clinic-day board |
+| `DOK32_DATABASE_URL` | Optional — read-only Dok32 availability |
+| `ADMIN_USERNAME`, `ADMIN_PASSWORD` | Only while running `create-admin` (below); remove the password afterwards |
+
+**Frontend variables** (read at **build** time — redeploy after changing): `NEXT_PUBLIC_API_URL` (the API origin, no `/api` — e.g. `https://api.example.com`) and `NEXT_PUBLIC_SOCKET_URL` (e.g. `https://api.example.com`).
+
+**First deploy**
+
+1. Deploy the backend; the pre-deploy step applies the migrations.
+2. Create the first admin on the empty database — once, from the service's shell:
+   `ADMIN_USERNAME=… ADMIN_PASSWORD=… npm run create-admin` (12+ characters with a letter and a number; the password is never printed; re-running changes nothing, `-- --reset` sets a new password). Then delete `ADMIN_PASSWORD` from the variables.
+3. Sign in, add the WhatsApp numbers in Settings, and add staff test numbers under Settings → Campaign safety.
+4. Re-point the Meta webhook (App → WhatsApp → Configuration) to `https://<api-host>/api/webhooks/whatsapp/messages` with the same verify token, and check each WABA is still subscribed.
 
 ---
 
@@ -262,6 +295,7 @@ Empty — kept for potential future top-level route files. All current routes li
 | `PORT` | Port the server listens on (default 8000) |
 | `NODE_ENV` | `development` or `production` |
 | `FRONTEND_URL` | Allowed CORS origin (e.g. `http://localhost:3000`) |
+| `COOKIE_SAMESITE` | `lax` (default), `strict` or `none` (cross-site deploys; forces Secure) |
 | `DATABASE_URL` | Neon PostgreSQL connection string |
 | `JWT_SECRET` | Secret key for signing JWTs |
 | `WHATSAPP_APP_SECRET` | Used to verify incoming webhook signatures |

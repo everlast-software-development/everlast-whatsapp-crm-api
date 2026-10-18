@@ -2,13 +2,21 @@ const jwt = require("jsonwebtoken");
 const bcryptjs = require("bcryptjs");
 const prisma = require("../../config/prisma");
 const AppError = require("../../utils/AppError");
+const logAudit = require("../../utils/audit");
+const { COOKIE_OPTIONS } = require("../../config/cookies");
 const { permissionsFor } = require("../../config/permissions");
 
-const COOKIE_OPTIONS = {
-  httpOnly: true,
-  secure: process.env.NODE_ENV === "production",
-  sameSite: "lax",
-  maxAge: 8 * 60 * 60 * 1000, // 8 hours in ms
+// Sign a session and set it as the auth cookie. `tv` is the user's
+// tokenVersion: protect() and the socket handshake reject a token whose `tv`
+// no longer matches, which is how a password change signs out every other
+// session. Also used by changeMyPassword to keep the current tab signed in.
+const issueAuthCookie = (res, user) => {
+  const token = jwt.sign(
+    { id: user.id, username: user.username, role: user.role, tv: user.tokenVersion ?? 0 },
+    process.env.JWT_SECRET,
+    { expiresIn: "8h" },
+  );
+  res.cookie("token", token, COOKIE_OPTIONS);
 };
 
 const login = async (req, res, next) => {
@@ -19,10 +27,18 @@ const login = async (req, res, next) => {
     }
 
     const user = await prisma.user.findUnique({ where: { username } });
-    if (!user) return next(new AppError("Invalid credentials", 401));
-
-    const isMatch = await bcryptjs.compare(password, user.passwordHash);
-    if (!isMatch) return next(new AppError("Invalid credentials", 401));
+    const isMatch = user ? await bcryptjs.compare(password, user.passwordHash) : false;
+    if (!isMatch) {
+      // The attempted username and the IP only — never the password.
+      logAudit({
+        action: "auth.login_failed",
+        actor: null,
+        targetType: "user",
+        targetId: user?.id ?? 0,
+        details: { username: String(username).slice(0, 40), ip: req.ip },
+      });
+      return next(new AppError("Invalid credentials", 401));
+    }
     // Checked after the password, so this can't be used to discover which
     // usernames exist. Previously a deactivated account was issued a token and
     // only rejected on its next request.
@@ -35,13 +51,9 @@ const login = async (req, res, next) => {
       data: { status: "ONLINE", lastActiveAt: new Date() },
     });
 
-    const token = jwt.sign(
-      { id: user.id, username: user.username, role: user.role },
-      process.env.JWT_SECRET,
-      { expiresIn: "8h" },
-    );
+    issueAuthCookie(res, user);
 
-    res.cookie("token", token, COOKIE_OPTIONS);
+    logAudit({ action: "auth.login", actor: user, targetType: "user", targetId: user.id, details: { ip: req.ip } });
 
     res.status(200).json({
       success: true,
@@ -67,10 +79,11 @@ const logout = async (req, res, next) => {
     });
 
     res.clearCookie("token", COOKIE_OPTIONS);
+    logAudit({ action: "auth.logout", actor: req.user, targetType: "user", targetId: req.user.id, details: null });
     res.status(200).json({ success: true, message: "Logged out" });
   } catch (err) {
     next(err);
   }
 };
 
-module.exports = { login, logout };
+module.exports = { login, logout, issueAuthCookie };

@@ -2,7 +2,7 @@ const AppError = require("../utils/AppError");
 const { ALL_PERMISSIONS, roleHasPermission } = require("../config/permissions");
 
 // Variadic with ALL semantics: requirePermission("list:write", "contact:import")
-// means the caller needs both. There is currently no route needing "any of".
+// means the caller needs both. For "any of", see requireAnyPermission below.
 //
 // Replaces middleware/roles.js. requireRole was de facto an isAdmin gate — all
 // 23 call sites passed exactly "ADMIN" — so route files said *who* could call
@@ -31,4 +31,21 @@ const requirePermission = (...permissions) => {
   };
 };
 
+// Variadic with ANY semantics: the caller needs at least one of them. Same
+// boot-time validation of the names.
+const requireAnyPermission = (...permissions) => {
+  for (const p of permissions) {
+    if (!ALL_PERMISSIONS.includes(p)) {
+      throw new Error(`requireAnyPermission: unknown permission "${p}"`);
+    }
+  }
+
+  return (req, res, next) => {
+    if (!req.user?.role) return next(new AppError("No token provided", 401, "NO_TOKEN"));
+    if (permissions.some((p) => roleHasPermission(req.user.role, p))) return next();
+    next(new AppError(`Forbidden: requires one of ${permissions.join(", ")}`, 403, "FORBIDDEN"));
+  };
+};
+
 module.exports = requirePermission;
+module.exports.requireAnyPermission = requireAnyPermission;

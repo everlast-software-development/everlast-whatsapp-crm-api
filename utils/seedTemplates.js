@@ -34,7 +34,7 @@ const seed = async () => {
 };
 
 seed().catch((e) => {
-  console.error(e);
+  console.error(require("./safeError")(e));
   prisma.$disconnect();
   process.exit(1);
 });

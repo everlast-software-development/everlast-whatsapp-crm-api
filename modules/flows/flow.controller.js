@@ -3,6 +3,7 @@ const AppError = require("../../utils/AppError");
 const logAudit = require("../../utils/audit");
 const { validateGraph, variablesOf } = require("../../utils/flowGraph");
 const { expireStaleRuns } = require("../../utils/flowEngine");
+const { roleHasPermission } = require("../../config/permissions");
 
 const RUN_STATUSES = ["ACTIVE", "COMPLETED", "HANDED_OFF", "STOPPED", "EXPIRED", "FAILED"];
 
@@ -20,6 +21,27 @@ const invalidGraph = (res, errors) =>
     message: errors[0]?.message || "The flow has problems",
     details: { errors },
   });
+
+// A flow attached to a campaign that has been submitted is part of what the
+// admin reviewed (or is already answering patients), so it's frozen for
+// builders. Admins (campaign:send — they approve anyway) may still change it,
+// and that is audited. Returns the first such campaign, or null.
+const LOCKING_STATUSES = ["PENDING_APPROVAL", "SCHEDULED", "RUNNING", "PAUSED"];
+const STATUS_WORDS = { PENDING_APPROVAL: "awaiting approval", SCHEDULED: "scheduled", RUNNING: "running", PAUSED: "paused" };
+
+const lockingCampaign = (flowId) =>
+  prisma.campaign.findFirst({
+    where: { flowId, status: { in: LOCKING_STATUSES }, deletedAt: null },
+    select: { id: true, name: true, status: true },
+    orderBy: { createdAt: "desc" },
+  });
+
+const flowInUse = (campaign) =>
+  new AppError(
+    `This flow is used by campaign "${campaign.name}" (${STATUS_WORDS[campaign.status]}) — duplicate it to make changes.`,
+    409,
+    "FLOW_IN_USE",
+  );
 
 // Run counts per status for a set of flows: { [flowId]: { total, ACTIVE, ... } }.
 async function runStats(flowIds) {
@@ -113,6 +135,9 @@ const updateFlow = async (req, res, next) => {
     if (!id) return next(new AppError("Invalid flow id", 400));
     const existing = await prisma.flow.findUnique({ where: { id }, select: { id: true, updatedAt: true } });
     if (!existing) return next(new AppError("Flow not found", 404));
+    const locked = await lockingCampaign(id);
+    const isAdmin = roleHasPermission(req.user.role, "campaign:send");
+    if (locked && !isAdmin) return next(flowInUse(locked));
 
     // A builder tab opened before someone else saved must not silently put
     // its older copy back: the editor sends the version it loaded, and a save
@@ -145,7 +170,12 @@ const updateFlow = async (req, res, next) => {
     const flow = await prisma.flow.update({ where: { id }, data });
     logAudit({
       action: "flow.updated", actor: req.user, targetType: "flow", targetId: id,
-      details: { fields: Object.keys(data), ...(data.isActive !== undefined ? { isActive: data.isActive } : {}) },
+      details: {
+        fields: Object.keys(data),
+        ...(data.isActive !== undefined ? { isActive: data.isActive } : {}),
+        // An admin changing a flow a submitted/running campaign uses.
+        ...(locked ? { lockedByCampaign: { id: locked.id, name: locked.name, status: locked.status } } : {}),
+      },
     });
     res.json({ success: true, data: { ...flow, variables: variablesOf(flow.graph) } });
   } catch (err) {
@@ -162,13 +192,18 @@ const deleteFlow = async (req, res, next) => {
     if (!id) return next(new AppError("Invalid flow id", 400));
     const flow = await prisma.flow.findUnique({ where: { id }, select: { id: true, name: true, _count: { select: { runs: true } } } });
     if (!flow) return next(new AppError("Flow not found", 404));
+    const locked = await lockingCampaign(id);
+    if (locked && !roleHasPermission(req.user.role, "campaign:send")) return next(flowInUse(locked));
     if (flow._count.runs > 0) {
       return next(new AppError(
         `This flow has ${flow._count.runs} response(s). Turn it off instead, so its collected data is kept.`, 409,
       ));
     }
     await prisma.flow.delete({ where: { id } });
-    logAudit({ action: "flow.deleted", actor: req.user, targetType: "flow", targetId: id, details: { name: flow.name } });
+    logAudit({
+      action: "flow.deleted", actor: req.user, targetType: "flow", targetId: id,
+      details: { name: flow.name, ...(locked ? { lockedByCampaign: { id: locked.id, name: locked.name, status: locked.status } } : {}) },
+    });
     res.json({ success: true });
   } catch (err) {
     next(err);

@@ -1059,14 +1059,19 @@ const getCampaignReplies = async (req, res, next) => {
       },
     });
     const byCustomer = new Map(conversations.map((c) => [c.customerId, c]));
+    // Without inbox access (MARKETING) the results show who replied and which
+    // button they pressed, but not what a patient typed, and no chat link.
+    const inbox = roleHasPermission(req.user.role, "conversation:read");
+    const visibleReply = (m) =>
+      !m || inbox || m.messageType === "INTERACTIVE" ? m || null : { ...m, content: null };
 
     const data = recipients.map((r) => {
-      const conv = byCustomer.get(r.customer.id) || null;
+      const conv = inbox ? byCustomer.get(r.customer.id) || null : null;
       return {
         recipientId: r.id,
         repliedAt: r.repliedAt,
         customer: r.customer,
-        reply: r.replies[0] || null,
+        reply: visibleReply(r.replies[0]),
         conversation: conv && {
           id: conv.id,
           status: conv.status,
@@ -1425,7 +1430,12 @@ const setCampaignFlow = async (req, res, next) => {
     const id = parseInt(req.params.id);
     const existing = await prisma.campaign.findFirst({ where: { id, whatsappNumberId: req.numberId } });
     if (!existing) return next(new AppError("Campaign not found", 404));
-    const editErr = existing.status === "DRAFT" ? assertAgentMayEdit(existing, req.user) : null;
+    // The flow is part of what gets reviewed: once submitted (a rejection sends
+    // it back to DRAFT), nobody — admin included — swaps it under the approval.
+    if (existing.status !== "DRAFT") {
+      return next(new AppError("Flows can't be changed after a campaign is submitted", 409, "CAMPAIGN_NOT_DRAFT"));
+    }
+    const editErr = assertAgentMayEdit(existing, req.user);
     if (editErr) return next(editErr);
     const flowId = await resolveFlowId(req.body.flowId === undefined ? null : req.body.flowId);
 
@@ -1952,6 +1962,33 @@ const rejectCampaign = async (req, res, next) => {
 // a real handset before committing to a blast. Deliberately does NOT create a
 // campaign, recipient rows or a stored message — a test must not show up in
 // reporting or pollute a customer's chat history.
+// Test sends per user per hour. In memory: one process (single replica), and
+// a restart forgiving the count is harmless.
+const TEST_SENDS_PER_HOUR = 10;
+const testSendLog = new Map(); // userId -> timestamps (ms) in the last hour
+
+const takeTestSendSlot = (userId) => {
+  const hourAgo = Date.now() - 60 * 60 * 1000;
+  const recent = (testSendLog.get(userId) || []).filter((t) => t > hourAgo);
+  if (recent.length >= TEST_SENDS_PER_HOUR) {
+    testSendLog.set(userId, recent);
+    return false;
+  }
+  recent.push(Date.now());
+  testSendLog.set(userId, recent);
+  return true;
+};
+
+// ─── GET /api/campaigns/test-phones ─────────────────────────────────────────
+// The staff numbers a test may go to, for the test-send dialog's dropdown.
+const getTestPhones = async (req, res, next) => {
+  try {
+    res.status(200).json({ success: true, data: getSetting("testPhones").phones });
+  } catch (err) {
+    next(err);
+  }
+};
+
 const testSendTemplate = async (req, res, next) => {
   try {
     const { templateId, phone } = req.body;
@@ -1974,10 +2011,32 @@ const testSendTemplate = async (req, res, next) => {
     }
     const to = parsed.number.replace("+", "");
 
+    // Only to staff test numbers — everyone, admins included (an admin adds
+    // their own number in Settings). Otherwise "test" is a way to message any
+    // patient outside a reviewed campaign.
+    const allowed = getSetting("testPhones").phones;
+    if (!allowed.includes(to)) {
+      return next(new AppError(
+        allowed.length
+          ? "Tests can only go to the staff test numbers set in Settings → Campaign safety."
+          : "No test numbers are set up yet. An admin can add test numbers in Settings → Campaign safety.",
+        403,
+        "TEST_PHONE_NOT_ALLOWED",
+      ));
+    }
+    // Admins may test at night (they'd be testing on their own phone);
+    // everyone else respects quiet hours like a real send.
+    if (!canAuthorizeSend(req.user) && isQuietHours()) {
+      return next(new AppError("It's quiet hours — test sends are paused until the send window opens.", 409, "QUIET_HOURS"));
+    }
+
     const template = await prisma.template.findUnique({
       where: { id: Number(templateId) },
     });
     if (!template) return next(new AppError("Template not found", 404));
+    if (!takeTestSendSlot(req.user.id)) {
+      return next(new AppError(`You've sent ${TEST_SENDS_PER_HOUR} tests in the last hour. Please wait a bit before sending another.`, 429, "TEST_SEND_LIMIT"));
+    }
     // A test send has no campaign row, so unlike every other send path the
     // number comes from the request. Guarded so a test cannot "prove" a template
     // works on a line it could never actually be sent from.
@@ -2062,6 +2121,7 @@ const testSendTemplate = async (req, res, next) => {
 
 module.exports = {
   getPendingApprovals,
+  getTestPhones,
   beginShutdown,
   getCampaignCapacity: getCampaignCapacityHandler,
   recountCampaign,

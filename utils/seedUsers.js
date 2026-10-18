@@ -5,6 +5,14 @@
 // These passwords are public (they are in this file). Change or deactivate the
 // accounts before the app faces real users.
 require("../config/env");
+
+// Public passwords have no place on a live server. The first real admin
+// there comes from `npm run create-admin`.
+if (process.env.NODE_ENV === "production") {
+  console.error("seed: refusing to create the demo accounts with NODE_ENV=production. Use `npm run create-admin`.");
+  process.exit(1);
+}
+
 const prisma = require("../config/prisma");
 const bcryptjs = require("bcryptjs");
 

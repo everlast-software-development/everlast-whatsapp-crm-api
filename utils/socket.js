@@ -3,8 +3,16 @@ const jwt = require("jsonwebtoken");
 const prisma = require("../config/prisma");
 const numbers = require("./whatsappNumbers");
 const { mayUseNumber } = require("../middleware/whatsappNumber");
+const { roleHasPermission } = require("../config/permissions");
 
+// Two rooms per line. `number:<id>` carries the inbox — messages, conversation
+// changes, booking requests — and is only joined with conversation:read.
+// `number:<id>:campaigns` carries campaign live updates (progress, paused,
+// approved…) and is joined by everyone on the line, so MARKETING, who has no
+// inbox access, still sees their sends move.
 const numberRoom = (numberId) => `number:${numberId}`;
+const campaignRoom = (numberId) => `number:${numberId}:campaigns`;
+const canReadInbox = (user) => roleHasPermission(user?.role, "conversation:read");
 
 let io;
 // How long after a user's last tab closes before they show as offline.
@@ -38,9 +46,11 @@ const initSocket = (httpServer) => {
       // lastActiveAt here would make "last active" meaningless.
       const user = await prisma.user.findUnique({
         where: { id: decoded.id },
-        select: { id: true, username: true, role: true, isActive: true },
+        select: { id: true, username: true, role: true, isActive: true, tokenVersion: true },
       });
       if (!user || !user.isActive) return next(new Error("Unauthorized"));
+      // Signed out by a password change or reset (see middleware/auth.js).
+      if ((decoded.tv ?? 0) !== user.tokenVersion) return next(new Error("Unauthorized"));
 
       socket.user = { id: user.id, username: user.username, role: user.role };
       next();
@@ -76,13 +86,13 @@ const initSocket = (httpServer) => {
     // number's inbox.
     socket.on("typing.start", ({ conversationId, username }) => {
       const room = socket.data.whatsappNumberId;
-      if (!room) return;
+      if (!room || !roleHasPermission(socket.user.role, "conversation:write")) return;
       socket.to(numberRoom(room)).emit("typing.start", { conversationId, username });
     });
 
     socket.on("typing.stop", ({ conversationId, username }) => {
       const room = socket.data.whatsappNumberId;
-      if (!room) return;
+      if (!room || !roleHasPermission(socket.user.role, "conversation:write")) return;
       socket.to(numberRoom(room)).emit("typing.stop", { conversationId, username });
     });
 
@@ -132,7 +142,8 @@ const joinNumberRoom = async (socket, requestedId) => {
     for (const room of socket.rooms) {
       if (room.startsWith("number:")) socket.leave(room);
     }
-    socket.join(numberRoom(number.id));
+    socket.join(campaignRoom(number.id));
+    if (canReadInbox(socket.user)) socket.join(numberRoom(number.id));
     socket.data.whatsappNumberId = number.id;
     return true;
   } catch (err) {
@@ -152,13 +163,18 @@ const getIO = () => {
 //
 // The id is stamped into the payload as well as used for routing, so a client
 // can still tell events apart if it is ever in more than one room.
+//
+// campaign.* events go to both rooms (socket.io delivers once per socket even
+// when it is in both); everything else is inbox traffic and goes to the inbox
+// room only.
 const emitToNumber = (numberId, event, payload) => {
   if (!io) return;
   if (numberId === null || numberId === undefined) {
     console.warn(`Socket: "${event}" emitted with no number — dropped rather than broadcast`);
     return;
   }
-  io.to(numberRoom(numberId)).emit(event, { ...payload, whatsappNumberId: numberId });
+  const rooms = event.startsWith("campaign.") ? [numberRoom(numberId), campaignRoom(numberId)] : numberRoom(numberId);
+  io.to(rooms).emit(event, { ...payload, whatsappNumberId: numberId });
 };
 
 // For genuinely account-wide events that are not tied to one line.
@@ -174,7 +190,6 @@ const emitGlobal = (event, payload) => {
 const emitToNumberStaff = async (numberId, event, payload) => {
   if (!io) return;
   try {
-    const { roleHasPermission } = require("../config/permissions");
     const number = await numbers.getById(numberId);
     if (!number) return;
     for (const socket of io.sockets.sockets.values()) {

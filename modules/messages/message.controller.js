@@ -1,5 +1,6 @@
 const prisma = require("../../config/prisma");
 const AppError = require("../../utils/AppError");
+const logAudit = require("../../utils/audit");
 const { sendWhatsAppMessage } = require("../../utils/whatsappClient");
 const { fetchAndStoreMedia } = require("../../utils/whatsappMedia");
 const { emitToNumber } = require("../../utils/socket");
@@ -272,6 +273,11 @@ const deleteMessage = async (req, res, next) => {
       emitToNumber(message.conversation.whatsappNumberId, "message.deleted", {
         messageId: id,
         conversationId: message.conversationId,
+      });
+      // Which message, never what it said.
+      logAudit({
+        action: "message.deleted", actor: req.user, targetType: "conversation", targetId: message.conversationId,
+        details: { messageId: id },
       });
     }
 

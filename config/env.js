@@ -34,5 +34,22 @@ for (const key of recommended) {
   }
 }
 
+// On Railway, anything but NODE_ENV=production means insecure cookies, API docs
+// and the /api/dev tools exposed on a public URL.
+if (process.env.RAILWAY_ENVIRONMENT && process.env.NODE_ENV !== "production") {
+  console.warn(
+    `\n[Config] !!! WARNING: running on Railway with NODE_ENV=${process.env.NODE_ENV || "(unset)"}` +
+    " — set NODE_ENV=production. Cookies are not Secure, /api-docs and /api/dev are exposed. !!!\n",
+  );
+}
+
+// Without FRONTEND_URL, CORS and sockets fall back to http://localhost:3000
+// and the deployed frontend can't call the API at all.
+if (process.env.NODE_ENV === "production") {
+  for (const key of ["FRONTEND_URL"]) {
+    if (!process.env[key]) console.warn(`[Config] Warning: ${key} is required in production but is not set`);
+  }
+}
+
 // Expose API version so all modules use the same one
 process.env.WHATSAPP_API_VERSION = process.env.WHATSAPP_API_VERSION || "v19.0";

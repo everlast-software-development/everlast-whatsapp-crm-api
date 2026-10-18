@@ -10,6 +10,7 @@
 
 const prisma = require("../config/prisma");
 const AppError = require("./AppError");
+const { parsePhoneNumberFromString } = require("libphonenumber-js");
 
 const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
 
@@ -57,6 +58,29 @@ const SETTINGS = {
       const at = String(v.qualityPauseAt || "YELLOW").toUpperCase();
       if (!["YELLOW", "RED"].includes(at)) throw new AppError("Pause when quality is YELLOW or RED", 400);
       return { frequencyCapDays: days, qualityAutoPause: v.qualityAutoPause !== false, qualityPauseAt: at };
+    },
+  },
+
+  // Staff phones a campaign test send may go to (Settings → Campaign safety).
+  // A test send goes nowhere else, so "test" can't be used to message a
+  // patient outside a reviewed campaign. Stored as E.164 digits, no "+".
+  testPhones: {
+    defaults: { phones: [] },
+    normalise(v) {
+      if (!v || typeof v !== "object" || !Array.isArray(v.phones)) {
+        throw new AppError("Test numbers must be a list (phones: [...])", 400);
+      }
+      if (v.phones.length > 20) throw new AppError("At most 20 test numbers", 400);
+      const phones = [];
+      for (const raw of v.phones) {
+        const parsed = parsePhoneNumberFromString(String(raw || "").trim(), "AE");
+        if (!parsed || !parsed.isValid()) {
+          throw new AppError(`"${String(raw).slice(0, 30)}" isn't a valid phone number. Include the country code, e.g. +971 50 123 4567.`, 400);
+        }
+        const digits = parsed.number.replace("+", "");
+        if (!phones.includes(digits)) phones.push(digits);
+      }
+      return { phones };
     },
   },
 };

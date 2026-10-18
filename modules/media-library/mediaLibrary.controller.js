@@ -1,6 +1,7 @@
 const storage = require("../../utils/storage");
 const prisma = require("../../config/prisma");
 const AppError = require("../../utils/AppError");
+const logAudit = require("../../utils/audit");
 const { getMessageType } = require("../../utils/mediaHelpers");
 
 const VALID_TYPES = ["IMAGE", "VIDEO", "AUDIO", "DOCUMENT"];
@@ -74,6 +75,10 @@ const uploadMedia = async (req, res, next) => {
         createdById: req.user.id,
       },
     });
+    logAudit({
+      action: "media.uploaded", actor: req.user, targetType: "MediaAsset", targetId: asset.id,
+      details: { filename: asset.filename, mediaType: asset.mediaType, bytes: asset.bytes },
+    });
     res.status(201).json({ success: true, data: { ...asset, usageCount: 0 } });
   } catch (dbErr) {
     next(dbErr);
@@ -93,6 +98,7 @@ const updateMedia = async (req, res, next) => {
       where: { id },
       data: { filename: filename !== undefined ? String(filename).trim() : undefined },
     });
+    logAudit({ action: "media.renamed", actor: req.user, targetType: "MediaAsset", targetId: id, details: { filename: asset.filename } });
     const usageByUrl = await usageCountsByUrl([asset.url]);
     res.status(200).json({ success: true, data: { ...asset, usageCount: usageByUrl.get(asset.url) ?? 0 } });
   } catch (err) {
@@ -119,6 +125,10 @@ const deleteMedia = async (req, res, next) => {
     }
 
     await prisma.mediaAsset.delete({ where: { id } });
+    logAudit({
+      action: "media.deleted", actor: req.user, targetType: "MediaAsset", targetId: id,
+      details: { filename: asset.filename, mediaType: asset.mediaType },
+    });
     res.status(200).json({ success: true, message: "Media deleted" });
   } catch (err) {
     if (err.code === "P2025") return next(new AppError("Media not found", 404));

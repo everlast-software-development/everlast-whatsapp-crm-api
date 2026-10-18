@@ -1,5 +1,7 @@
 const prisma = require("../../config/prisma");
 const { Prisma } = require("@prisma/client");
+const { startOfLocalDay } = require("../supervision/supervision.controller");
+const { roleHasPermission } = require("../../config/permissions");
 const {
   conversationWhere,
   messageWhere,
@@ -16,8 +18,8 @@ const fmtDate = (val) =>
 // ─── GET /api/stats/overview ─────────────────────────────────────────────────
 const getOverview = async (req, res, next) => {
   try {
-    const now = new Date();
-    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    // Midnight in the clinic's time zone, not the server's (UTC on Railway).
+    const todayStart = startOfLocalDay();
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
 
     const [
@@ -162,6 +164,7 @@ const getConversationStats = async (req, res, next) => {
     const fortyEightHAgo = new Date(Date.now() - 48 * 60 * 60 * 1000);
     const sixHoursAgo    = new Date(Date.now() - 6  * 60 * 60 * 1000);
     const now            = Date.now();
+    const inbox          = roleHasPermission(req.user.role, "conversation:read");
 
     const [pipeline, avgResRaw, newLast7Raw, leads, stalled] = await Promise.all([
       prisma.conversation.groupBy({ by: ["status"], where: conversationWhere(req), _count: { id: true } }),
@@ -179,8 +182,10 @@ const getConversationStats = async (req, res, next) => {
         GROUP BY date
         ORDER BY date ASC
       `,
-      // Potential leads: unassigned, customer waiting, still fresh (<48h)
-      prisma.conversation.findMany({
+      // Potential leads: unassigned, customer waiting, still fresh (<48h).
+      // Both lists are patients' chats, so only for people with inbox access
+      // (MARKETING has stats:read but not conversation:read).
+      !inbox ? [] : prisma.conversation.findMany({
         where: {
           status: "OPEN",
           assignedAgentId: null,
@@ -193,7 +198,7 @@ const getConversationStats = async (req, res, next) => {
         take: 20,
       }),
       // Stalled: agent assigned but no reply for 6+ hours
-      prisma.conversation.findMany({
+      !inbox ? [] : prisma.conversation.findMany({
         where: {
           status: { not: "RESOLVED" },
           lastSenderType: "CUSTOMER",
