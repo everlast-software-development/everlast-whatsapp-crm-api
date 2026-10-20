@@ -14,6 +14,7 @@ process.env.WHATSAPP_TOKEN_WEBHOOKCHECK = "fake-token";
 process.env.WEBHOOK_STATUS_RETRY_MS = "300,1500";
 
 require("dotenv").config({ path: __dirname + "/../config.env", quiet: true });
+const util = require("util");
 const prisma = require("../config/prisma");
 const numbers = require("../utils/whatsappNumbers");
 const AppError = require("../utils/AppError");
@@ -207,8 +208,10 @@ function errorHandling() {
   const logged = [];
   const realError = console.error;
   const realWarn = console.warn;
-  console.error = (...a) => logged.push(a.map(String).join(" "));
-  console.warn = (...a) => logged.push(a.map(String).join(" "));
+  // util.format renders objects the way the real console does — the handler
+  // logs safeError(err), an object, not a string.
+  console.error = (...a) => logged.push(util.format(...a));
+  console.warn = (...a) => logged.push(util.format(...a));
   const run = (err) => {
     const out = {};
     const res = { status(c) { out.code = c; return this; }, json(b) { out.body = b; return this; } };
