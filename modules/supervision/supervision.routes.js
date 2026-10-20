@@ -1,7 +1,7 @@
 const express = require("express");
 const protect = require("../../middleware/auth");
 const requirePermission = require("../../middleware/permissions");
-const { getOverview, getConversations, getConversationTimeline, getBookings, getActivity } = require("./supervision.controller");
+const { getOverview, getConversations, getConversationTimeline, getActivity } = require("./supervision.controller");
 
 const router = express.Router();
 
@@ -12,9 +12,8 @@ router.use(protect, requirePermission("team:supervise"));
 router.get("/overview", getOverview);
 router.get("/conversations", getConversations);
 router.get("/conversations/:id", getConversationTimeline);
-router.get("/bookings", getBookings);
 router.get("/activity", getActivity);
-// Move one person's open chats and booking requests to a colleague / the queue.
+// Move one person's open chats to a colleague / the queue.
 router.post("/hand-over", async (req, res, next) => {
   try {
     const AppError = require("../../utils/AppError");
@@ -41,8 +40,7 @@ const { getReport, getTranscripts } = require("./report.controller");
 router.get("/report", getReport);
 router.get("/report/transcripts", getTranscripts);
 // The separate, detailed reports.
-const { getBookingsReport, getTeamReport, getCampaignsReport, getChatsReport } = require("./reports.controller");
-router.get("/reports/bookings", getBookingsReport);
+const { getTeamReport, getCampaignsReport, getChatsReport } = require("./reports.controller");
 router.get("/reports/team", getTeamReport);
 router.get("/reports/campaigns", getCampaignsReport);
 router.get("/reports/chats", getChatsReport);

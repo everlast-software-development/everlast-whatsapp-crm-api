@@ -13,8 +13,6 @@
 //             link-only cards. Cards is WhatsApp's interactive (non-template)
 //             carousel: free inside the 24-hour window, no Meta approval.
 //   question  next          (after a valid answer)
-//   slot_picker next        (after a day + time is chosen, or its fallback —
-//             see the "Pick appointment" section of flowEngine.js)
 //   tag       next
 //   assign    —             (hands the chat to a human; the run ends)
 //   end       —
@@ -24,7 +22,7 @@
 // time, which in a flow means a customer left hanging mid-conversation — so they
 // are enforced here, at save, instead.
 
-const NODE_TYPES = ["trigger", "message", "list", "carousel", "cards", "question", "slot_picker", "tag", "assign", "end"];
+const NODE_TYPES = ["trigger", "message", "list", "carousel", "cards", "question", "tag", "assign", "end"];
 const MEDIA_TYPES = ["NONE", "IMAGE", "VIDEO", "DOCUMENT"];
 const INPUT_TYPES = ["text", "number", "email", "phone", "date"];
 
@@ -71,7 +69,6 @@ function handlesOf(node) {
       return taps.length ? taps : ["next"];
     }
     case "question":
-    case "slot_picker":
     case "tag":
       return ["next"];
     default:
@@ -89,18 +86,10 @@ function nodeById(graph, id) {
   return (graph.nodes || []).find((n) => n.id === id) || null;
 }
 
-// The fields a Pick appointment step always saves into (fixed: booking
-// requests and the Book dialog read these names).
-const SLOT_VARIABLES = ["preferred_date", "preferred_time"];
-
 /** Variables the flow can collect — the columns of its responses table. */
 function variablesOf(graph) {
   const out = [];
   for (const n of graph.nodes || []) {
-    if (n.type === "slot_picker") {
-      for (const v of SLOT_VARIABLES) if (!out.includes(v)) out.push(v);
-      continue;
-    }
     const v = str(n.data?.variable);
     if (v && ["question", "message", "list", "carousel", "cards"].includes(n.type) && !out.includes(v)) out.push(v);
   }
@@ -127,6 +116,10 @@ function validateGraph(input) {
     const type = raw?.type;
     if (!id) { fail("A step is missing its id"); continue; }
     if (ids.has(id)) { fail(`Two steps share the id "${id}"`, id); continue; }
+    // Retired with booking (moved to a later phase). Flows saved before then
+    // still load and run (the engine hands the chat to the team when it reaches
+    // one), but they can't be saved again with the step in them.
+    if (type === "slot_picker") { fail("The Pick appointment step is no longer available — remove it from this flow.", id); continue; }
     if (!NODE_TYPES.includes(type)) { fail(`Unknown step type "${type}"`, id); continue; }
     ids.add(id);
 
@@ -153,7 +146,7 @@ function validateGraph(input) {
     const checkVariable = () => {
       const v = str(d.variable);
       if (v && !VARIABLE_RE.test(v)) {
-        fail(`"${v}" isn't a valid field name — use lowercase letters, numbers and _ (e.g. booking_date)`, id);
+        fail(`"${v}" isn't a valid field name — use lowercase letters, numbers and _ (e.g. preferred_date)`, id);
       }
       return v || undefined;
     };
@@ -264,20 +257,6 @@ function validateGraph(input) {
         data.errorText = str(d.errorText) || undefined;
         break;
       }
-      case "slot_picker": {
-        // Every text is optional: empty means the engine's default wording.
-        const optText = (field, max) => {
-          const v = str(d[field]);
-          if (v.length > max) fail(`Text is ${v.length} characters — WhatsApp allows ${max}`, id);
-          return v || undefined;
-        };
-        data.dayText = optText("dayText", LIMITS.body);
-        data.timeText = optText("timeText", LIMITS.body);
-        data.noSlotsText = optText("noSlotsText", LIMITS.text);
-        data.fallbackDayText = optText("fallbackDayText", LIMITS.text);
-        data.fallbackTimeText = optText("fallbackTimeText", LIMITS.text);
-        break;
-      }
       case "tag": {
         data.tag = str(d.tag);
         if (!data.tag) fail("Enter the tag to add", id);
@@ -329,4 +308,4 @@ function validateGraph(input) {
   return { graph: { nodes, edges }, errors };
 }
 
-module.exports = { NODE_TYPES, INPUT_TYPES, LIMITS, SLOT_VARIABLES, handlesOf, nextNodeId, nodeById, variablesOf, validateGraph };
+module.exports = { NODE_TYPES, INPUT_TYPES, LIMITS, handlesOf, nextNodeId, nodeById, variablesOf, validateGraph };

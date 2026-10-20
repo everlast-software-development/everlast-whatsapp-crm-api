@@ -95,9 +95,6 @@ app.use("/api/campaigns", require("./modules/campaigns/campaign.routes"));
 app.use("/api/whatsapp", require("./modules/whatsapp-status/whatsappStatus.routes"));
 app.use("/api/settings", require("./modules/settings/settings.routes"));
 app.use("/api/supervision", require("./modules/supervision/supervision.routes"));
-app.use("/api/booking-requests", require("./modules/bookingRequests/bookingRequest.routes"));
-// Free appointment times in Dok32 (read-only).
-app.use("/api/availability", require("./modules/availability/availability.routes"));
 // The AI assistant's knowledge base, and "Test the assistant".
 app.use("/api/knowledge", require("./modules/knowledge/knowledge.routes"));
 // Dev-only tools (message/cost tracker). Never mounted in production.

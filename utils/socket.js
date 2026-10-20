@@ -6,7 +6,7 @@ const { mayUseNumber } = require("../middleware/whatsappNumber");
 const { roleHasPermission } = require("../config/permissions");
 
 // Two rooms per line. `number:<id>` carries the inbox — messages, conversation
-// changes, booking requests — and is only joined with conversation:read.
+// changes, notes — and is only joined with conversation:read.
 // `number:<id>:campaigns` carries campaign live updates (progress, paused,
 // approved…) and is joined by everyone on the line, so MARKETING, who has no
 // inbox access, still sees their sends move.
@@ -136,7 +136,7 @@ const joinNumberRoom = async (socket, requestedId) => {
   try {
     const id = Number(requestedId);
     let number = Number.isInteger(id) && id > 0 ? await numbers.getById(id) : null;
-    if (!number || !number.isActive) number = await numbers.getDefault();
+    if (!number || !number.isActive) number = await numbers.getDefaultFor(socket.user);
     if (!number || !mayUseNumber(socket.user, number)) return false;
 
     for (const room of socket.rooms) {

@@ -30,6 +30,19 @@ const app = require("../app");
 const RESET = "\x1b[0m", G = "\x1b[32m", R = "\x1b[31m", D = "\x1b[90m";
 const NOPE = 999999999; // an id no row will ever have
 
+// Booking was removed (moved to a later phase). These must stay gone: even an
+// admin, who passes every guard, gets 404.
+const REMOVED = [
+  ["GET", "/api/booking-requests"],
+  ["POST", `/api/booking-requests/${NOPE}/book`],
+  ["POST", `/api/conversations/${NOPE}/booking-requests`],
+  ["POST", `/api/conversations/${NOPE}/bookings/${NOPE}/cancel`],
+  ["GET", "/api/availability/days"],
+  ["GET", "/api/stats/clinic-day"],
+  ["GET", "/api/supervision/bookings"],
+  ["GET", "/api/supervision/reports/bookings"],
+];
+
 // [method, path, permission it should require]
 const ENDPOINTS = [
   // audit
@@ -68,28 +81,16 @@ const ENDPOINTS = [
   ["GET", "/api/supervision/overview", "team:supervise"],
   ["GET", "/api/supervision/conversations", "team:supervise"],
   ["GET", `/api/supervision/conversations/${NOPE}`, "team:supervise"],
-  ["GET", "/api/supervision/bookings", "team:supervise"],
   ["GET", "/api/supervision/activity", "team:supervise"],
   ["GET", "/api/supervision/report", "team:supervise"],
   ["GET", "/api/supervision/report/transcripts", "team:supervise"],
-  ["GET", "/api/supervision/reports/bookings", "team:supervise"],
   ["GET", "/api/supervision/reports/team", "team:supervise"],
   ["GET", "/api/supervision/reports/campaigns", "team:supervise"],
   ["GET", "/api/supervision/reports/chats", "team:supervise"],
   // chat outcome + notes
   ["PUT", `/api/conversations/${NOPE}/outcome`, "conversation:write"],
-  ["POST", `/api/conversations/${NOPE}/bookings/${NOPE}/cancel`, "conversation:write"],
   ["GET", `/api/conversations/${NOPE}/notes`, "conversation:read"],
   ["POST", `/api/conversations/${NOPE}/notes`, "conversation:write"],
-  // booking requests
-  ["GET", "/api/booking-requests", "conversation:read"],
-  ["GET", "/api/booking-requests/counts", "conversation:read"],
-  ["GET", `/api/booking-requests/${NOPE}`, "conversation:read"],
-  ["POST", `/api/booking-requests/${NOPE}/claim`, "conversation:write"],
-  ["POST", `/api/booking-requests/${NOPE}/book`, "conversation:write"],
-  ["POST", `/api/booking-requests/${NOPE}/not-booked`, "conversation:write"],
-  ["POST", `/api/booking-requests/${NOPE}/reopen`, "conversation:write"],
-  ["POST", `/api/conversations/${NOPE}/booking-requests`, "conversation:write"],
   // contacts
   ["GET", "/api/customers", "contact:read"],
   ["GET", `/api/customers/${NOPE}`, "contact:read"],
@@ -135,8 +136,6 @@ const ENDPOINTS = [
   ["POST", "/api/media/upload", "media:upload"],
   // reporting
   ["GET", "/api/stats/overview", "stats:read"],
-  // availability is "any of" (conversation:read or campaign:read), which this
-  // one-permission table can't express — not listed.
   // team
   ["GET", "/api/users", "user:read"],
   // The agent picker's list — open to anyone who can assign, which includes
@@ -241,6 +240,24 @@ async function main() {
       }
       if (rowOk) pass++; else fail++;
       console.log(`${rowOk ? G + "PASS" : R + "FAIL"}${RESET} ${method.padEnd(6)} ${urlPath.padEnd(48)} ${D}${perm.padEnd(20)} ${row.join("  ")}${RESET}`);
+    }
+
+    for (const [method, urlPath] of REMOVED) {
+      const status = await request(port, method, urlPath, tokens.ADMIN);
+      if (status === 404) pass++;
+      else {
+        fail++;
+        failures.push(`${method} ${urlPath} as ADMIN: expected 404 (removed), got ${status}`);
+      }
+      console.log(`${status === 404 ? G + "PASS" : R + "FAIL"}${RESET} ${method.padEnd(6)} ${urlPath.padEnd(48)} ${D}removed → ${status}${RESET}`);
+    }
+    if (ROLES.some((role) => roleHasPermission(role, "clinic:read"))) {
+      fail++;
+      failures.push(`clinic:read is still granted to a role`);
+      console.log(`${R}FAIL${RESET} clinic:read is gone from config/permissions.js`);
+    } else {
+      pass++;
+      console.log(`${G}PASS${RESET} clinic:read is gone from config/permissions.js`);
     }
 
     // CSRF: a state-changing call without the header is refused even for an admin.

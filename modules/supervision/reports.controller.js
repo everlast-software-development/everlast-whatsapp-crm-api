@@ -4,7 +4,7 @@ const { getQuietHoursConfig, localMinuteOfDay } = require("../../utils/quietHour
 const { SLA_MINUTES, responseTimes } = require("./supervision.controller");
 const { readPeriod, teamRoles } = require("./report.controller");
 
-// The separate, detailed reports (Bookings, Team, Campaigns, Chats). Each takes
+// The separate, detailed reports (Team, Campaigns, Chats). Each takes
 // ?from=YYYY-MM-DD&to=YYYY-MM-DD (clinic time zone, both days included, max 92
 // days) and optional ?numberId=. The overview report and transcripts live in
 // report.controller.js.
@@ -40,112 +40,9 @@ const meta = (req, period) => ({
   slaMinutes: SLA_MINUTES,
 });
 
-// ─── GET /api/supervision/reports/bookings ──────────────────────────────────
-// Every booking request opened in the period, or closed in it: what was asked,
-// where the patient came from, who took it and how fast, the appointments
-// booked, or why it couldn't be booked.
-const getBookingsReport = async (req, res, next) => {
-  try {
-    const period = readPeriod(req);
-    const inPeriod = { gte: period.from, lt: period.to };
-    const line = period.numberId ? { whatsappNumberId: period.numberId } : {};
-    const requests = await prisma.bookingRequest.findMany({
-      where: { ...line, OR: [{ createdAt: inPeriod }, { handledAt: inPeriod }] },
-      orderBy: { createdAt: "asc" },
-      include: {
-        customer: { select: { id: true, name: true, phone: true } },
-        campaign: { select: { id: true, name: true } },
-        suggestedCampaign: { select: { id: true, name: true } },
-        claimedBy: PERSON,
-        handledBy: PERSON,
-        bookings: { orderBy: { appointmentAt: "asc" }, include: { createdBy: PERSON } },
-      },
-    });
-    const lines = new Map((await prisma.whatsAppNumber.findMany({ select: { id: true, label: true } })).map((l) => [l.id, l.label]));
-
-    const rows = requests.map((r) => {
-      const live = r.bookings.filter((b) => b.status === "BOOKED");
-      return {
-        id: r.id,
-        conversationId: r.conversationId,
-        createdAt: r.createdAt,
-        customer: r.customer,
-        line: lines.get(r.whatsappNumberId) || null,
-        openedVia: r.source, // FLOW | AGENT
-        requested: r.requested,
-        note: r.note,
-        leadSource: r.leadSource,
-        sourceStatus: r.sourceStatus,
-        campaign: r.campaign?.name || null,
-        suggestedCampaign: r.suggestedCampaign?.name || null,
-        status: r.status,
-        claimedBy: who(r.claimedBy),
-        claimedAt: r.claimedAt,
-        handledBy: who(r.handledBy),
-        handledAt: r.handledAt,
-        // Working minutes from the request to being picked up / closed.
-        minutesToPickUp: r.claimedAt ? workingMinutesBetween(r.createdAt, r.claimedAt) : null,
-        minutesToClose: r.handledAt ? workingMinutesBetween(r.createdAt, r.handledAt) : null,
-        notBookedReason: r.notBookedReason,
-        notBookedNote: r.notBookedNote,
-        appointmentsBooked: live.length,
-        appointmentsCancelled: r.bookings.length - live.length,
-        appointments: r.bookings.map((b) => ({
-          id: b.id,
-          service: b.service,
-          appointmentAt: b.appointmentAt,
-          doctor: b.doctor,
-          dok32Ref: b.dok32Ref,
-          note: b.note,
-          status: b.status,
-          bookedBy: who(b.createdBy),
-          bookedAt: b.createdAt,
-        })),
-      };
-    });
-
-    const closed = rows.filter((r) => r.minutesToClose !== null);
-    const byAgent = {};
-    for (const r of rows) {
-      if (!r.handledBy) continue;
-      const a = (byAgent[r.handledBy] ||= { agent: r.handledBy, booked: 0, notBooked: 0, appointments: 0, closeMinutes: [] });
-      if (r.status === "BOOKED") a.booked++;
-      if (r.status === "NOT_BOOKED") a.notBooked++;
-      a.appointments += r.appointmentsBooked;
-      if (r.minutesToClose !== null) a.closeMinutes.push(r.minutesToClose);
-    }
-
-    res.status(200).json({
-      success: true,
-      data: {
-        ...meta(req, period),
-        summary: {
-          requests: rows.length,
-          byStatus: countBy(rows, (r) => r.status),
-          byOpenedVia: countBy(rows, (r) => r.openedVia),
-          byLeadSource: countBy(rows, (r) => r.leadSource || (r.sourceStatus === "SUGGESTED" ? "SUGGESTED" : "UNKNOWN")),
-          notBookedReasons: countBy(rows.filter((r) => r.status === "NOT_BOOKED"), (r) => r.notBookedReason || "OTHER"),
-          appointmentsBooked: rows.reduce((n, r) => n + r.appointmentsBooked, 0),
-          appointmentsCancelled: rows.reduce((n, r) => n + r.appointmentsCancelled, 0),
-          patientsBooked: new Set(rows.filter((r) => r.appointmentsBooked > 0).map((r) => r.customer.id)).size,
-          bookingRate: rows.filter((r) => r.status === "BOOKED" || r.status === "NOT_BOOKED").length
-            ? Math.round((rows.filter((r) => r.status === "BOOKED").length / rows.filter((r) => r.status === "BOOKED" || r.status === "NOT_BOOKED").length) * 100)
-            : null,
-          avgMinutesToPickUp: avg(rows.filter((r) => r.minutesToPickUp !== null).map((r) => r.minutesToPickUp)),
-          avgMinutesToClose: avg(closed.map((r) => r.minutesToClose)),
-        },
-        byAgent: Object.values(byAgent).map((a) => ({ ...a, avgMinutesToClose: avg(a.closeMinutes), closeMinutes: undefined })),
-        requests: rows,
-      },
-    });
-  } catch (err) {
-    next(err);
-  }
-};
-
 // ─── GET /api/supervision/reports/team ──────────────────────────────────────
 // How each person on the team did: speed (average, median, slowest 10%,
-// bands), volume, outcomes, bookings, notes; plus the team's day-by-day trend
+// bands), volume, outcomes, notes; plus the team's day-by-day trend
 // and the busiest hours (when patients write in).
 const getTeamReport = async (req, res, next) => {
   try {
@@ -154,15 +51,13 @@ const getTeamReport = async (req, res, next) => {
     const line = period.numberId ? { whatsappNumberId: period.numberId } : {};
     const msgLine = period.numberId ? { conversation: { whatsappNumberId: period.numberId } } : {};
 
-    const [users, staffMsgs, patientMsgs, waits, outcomeEvents, notes, requests, bookings, assignedNow] = await Promise.all([
+    const [users, staffMsgs, patientMsgs, waits, outcomeEvents, notes, assignedNow] = await Promise.all([
       prisma.user.findMany({ where: { role: { in: teamRoles(req.user) } }, select: { id: true, name: true, username: true, role: true, isActive: true } }),
       prisma.message.findMany({ where: { createdAt: inPeriod, senderType: "AGENT", senderId: { not: null }, deletedAt: null, ...msgLine }, select: { conversationId: true, senderId: true, createdAt: true } }),
       prisma.message.findMany({ where: { createdAt: inPeriod, senderType: "CUSTOMER", deletedAt: null, ...msgLine }, select: { conversationId: true, createdAt: true } }),
       responseTimes(period.from, line, period.to),
       prisma.auditLog.findMany({ where: { action: "conversation.outcome_set", createdAt: inPeriod, targetType: "conversation" }, select: { actorId: true, details: true, targetId: true } }),
       prisma.conversationNote.findMany({ where: { createdAt: inPeriod, ...(period.numberId ? { conversation: { whatsappNumberId: period.numberId } } : {}) }, select: { authorId: true } }),
-      prisma.bookingRequest.findMany({ where: { ...line, OR: [{ claimedAt: inPeriod }, { handledAt: inPeriod }] }, select: { claimedById: true, claimedAt: true, handledById: true, handledAt: true, status: true, createdAt: true } }),
-      prisma.booking.findMany({ where: { createdAt: inPeriod, status: "BOOKED", ...line }, select: { createdById: true, customerId: true, createdAt: true } }),
       prisma.conversation.groupBy({ by: ["assignedAgentId"], where: { ...line, assignedAgentId: { not: null }, status: { not: "RESOLVED" } }, _count: { _all: true } }),
     ]);
 
@@ -173,7 +68,6 @@ const getTeamReport = async (req, res, next) => {
     }
     const answered = waits.filter((w) => w.minutes !== null);
     const openNow = new Map(assignedNow.map((g) => [g.assignedAgentId, g._count._all]));
-    const inRange = (d) => d && d >= period.from && d < period.to;
 
     const agents = users
       .map((u) => {
@@ -199,15 +93,10 @@ const getTeamReport = async (req, res, next) => {
           responseBands: bands(mine),
           outcomes: countBy(myOutcomes, (e) => (e.details && e.details.outcome) || "CLEARED"),
           notesWritten: notes.filter((n) => n.authorId === u.id).length,
-          requestsTaken: requests.filter((r) => r.claimedById === u.id && inRange(r.claimedAt)).length,
-          requestsBooked: requests.filter((r) => r.handledById === u.id && r.status === "BOOKED" && inRange(r.handledAt)).length,
-          requestsNotBooked: requests.filter((r) => r.handledById === u.id && r.status === "NOT_BOOKED" && inRange(r.handledAt)).length,
-          appointmentsBooked: bookings.filter((b) => b.createdById === u.id).length,
-          patientsBooked: new Set(bookings.filter((b) => b.createdById === u.id).map((b) => b.customerId)).size,
           openChatsNow: openNow.get(u.id) || 0,
         };
       })
-      .filter((a) => a.replies || a.firstResponses || a.appointmentsBooked || a.requestsTaken || a.requestsBooked || a.requestsNotBooked || a.notesWritten || Object.keys(a.outcomes).length)
+      .filter((a) => a.replies || a.firstResponses || a.notesWritten || Object.keys(a.outcomes).length)
       .sort((a, b) => b.replies - a.replies);
 
     // Day by day for the whole team.
@@ -223,7 +112,6 @@ const getTeamReport = async (req, res, next) => {
         avgFirstResponseMinutes: avg(dayWaits),
         lateResponses: dayWaits.filter((m) => m >= SLA_MINUTES).length,
         unanswered: waits.filter((w) => w.minutes === null && dayOf(w.askedAt) === day).length,
-        appointmentsBooked: bookings.filter((b) => dayOf(b.createdAt) === day).length,
       };
     });
 
@@ -251,7 +139,6 @@ const getTeamReport = async (req, res, next) => {
           lateResponses: all.filter((m) => m >= SLA_MINUTES).length,
           unanswered: waits.length - answered.length,
           responseBands: bands(all),
-          appointmentsBooked: bookings.length,
         },
         agents,
         daily,
@@ -264,8 +151,8 @@ const getTeamReport = async (req, res, next) => {
 };
 
 // ─── GET /api/supervision/reports/campaigns ─────────────────────────────────
-// Campaigns that started in the period, from sent to booked: delivery, reads,
-// replies, booking requests, patients booked, couldn't-book reasons, opt-outs.
+// Campaigns that started in the period, from sent to replied: delivery, reads,
+// replies, opt-outs.
 const getCampaignsReport = async (req, res, next) => {
   try {
     const period = readPeriod(req);
@@ -284,14 +171,10 @@ const getCampaignsReport = async (req, res, next) => {
     if (ids.length === 0) {
       return res.status(200).json({ success: true, data: { ...meta(req, period), totals: null, campaigns: [] } });
     }
-    const [recipients, requests, bookings] = await Promise.all([
-      prisma.campaignRecipient.findMany({
-        where: { campaignId: { in: ids } },
-        select: { campaignId: true, customerId: true, status: true, sentAt: true, repliedAt: true, message: { select: { status: true } } },
-      }),
-      prisma.bookingRequest.findMany({ where: { OR: [{ campaignId: { in: ids } }, { suggestedCampaignId: { in: ids } }] }, select: { campaignId: true, suggestedCampaignId: true, status: true, notBookedReason: true, customerId: true } }),
-      prisma.booking.findMany({ where: { campaignId: { in: ids }, status: "BOOKED" }, select: { campaignId: true, customerId: true, service: true } }),
-    ]);
+    const recipients = await prisma.campaignRecipient.findMany({
+      where: { campaignId: { in: ids } },
+      select: { campaignId: true, customerId: true, status: true, sentAt: true, repliedAt: true, message: { select: { status: true } } },
+    });
     // Opt-outs on the campaign's line by its recipients within 7 days of sending.
     const optOuts = await prisma.customerOptOut.findMany({
       where: { customerId: { in: [...new Set(recipients.map((r) => r.customerId))] } },
@@ -304,10 +187,6 @@ const getCampaignsReport = async (req, res, next) => {
       const delivered = sent.filter((r) => ["DELIVERED", "READ"].includes(r.message?.status)).length;
       const read = sent.filter((r) => r.message?.status === "READ").length;
       const replied = rs.filter((r) => r.repliedAt).length;
-      const reqs = requests.filter((r) => r.campaignId === c.id);
-      const suggested = requests.filter((r) => r.suggestedCampaignId === c.id && r.campaignId !== c.id).length;
-      const bk = bookings.filter((b) => b.campaignId === c.id);
-      const patientsBooked = new Set(bk.map((b) => b.customerId)).size;
       const sentIds = new Map(sent.map((r) => [r.customerId, r.sentAt]));
       const optedOut = optOuts.filter((o) => o.whatsappNumberId === c.whatsappNumberId && sentIds.has(o.customerId) && sentIds.get(o.customerId) && o.optedOutAt >= sentIds.get(o.customerId) && o.optedOutAt - sentIds.get(o.customerId) <= 7 * 24 * 60 * 60 * 1000).length;
       const pct = (n, d) => (d ? Math.round((n / d) * 1000) / 10 : null);
@@ -329,22 +208,11 @@ const getCampaignsReport = async (req, res, next) => {
         delivered,
         read,
         replied,
-        bookingRequests: reqs.length,
-        suggestedRequests: suggested,
-        requestsBooked: reqs.filter((r) => r.status === "BOOKED").length,
-        requestsNotBooked: reqs.filter((r) => r.status === "NOT_BOOKED").length,
-        requestsOpen: reqs.filter((r) => r.status === "NEW" || r.status === "IN_PROGRESS").length,
-        notBookedReasons: countBy(reqs.filter((r) => r.status === "NOT_BOOKED"), (r) => r.notBookedReason || "OTHER"),
-        patientsBooked,
-        appointmentsBooked: bk.length,
-        services: countBy(bk, (b) => b.service || "—"),
         optOuts: optedOut,
         rates: {
           delivered: pct(delivered, sent.length),
           read: pct(read, sent.length),
           replied: pct(replied, sent.length),
-          booked: pct(patientsBooked, sent.length),
-          bookedOfReplied: pct(patientsBooked, replied),
           optOut: pct(optedOut, sent.length),
         },
       };
@@ -360,9 +228,6 @@ const getCampaignsReport = async (req, res, next) => {
           delivered: sum("delivered"),
           read: sum("read"),
           replied: sum("replied"),
-          bookingRequests: sum("bookingRequests"),
-          patientsBooked: sum("patientsBooked"),
-          appointmentsBooked: sum("appointmentsBooked"),
           optOuts: sum("optOuts"),
         },
         campaigns: rows,
@@ -375,7 +240,7 @@ const getCampaignsReport = async (req, res, next) => {
 
 // ─── GET /api/supervision/reports/chats ─────────────────────────────────────
 // One row per chat with a message in the period, with everything a supervisor
-// filters on: who handled it, how fast, longest wait, outcome, booking, source.
+// filters on: who handled it, how fast, longest wait, outcome.
 const getChatsReport = async (req, res, next) => {
   try {
     const period = readPeriod(req);
@@ -395,9 +260,7 @@ const getChatsReport = async (req, res, next) => {
           customer: { select: { id: true, name: true, phone: true, tags: true, optedOut: true } },
           assignedAgent: PERSON,
           outcomeBy: PERSON,
-          bookingRequests: { orderBy: { createdAt: "desc" }, take: 1, select: { status: true, notBookedReason: true, leadSource: true, sourceStatus: true, campaign: { select: { name: true } } } },
-          // Appointments still booked (cancelled ones don't count, as in every other report).
-          _count: { select: { notes: true, bookings: { where: { status: "BOOKED" } } } },
+          _count: { select: { notes: true } },
         },
       }),
       responseTimes(period.from, line, period.to),
@@ -421,7 +284,6 @@ const getChatsReport = async (req, res, next) => {
         const w = waits.filter((x) => x.conversationId === c.id);
         const done = w.filter((x) => x.minutes !== null).map((x) => x.minutes);
         const stillWaiting = w.filter((x) => x.minutes === null).map((x) => workingMinutesBetween(x.askedAt, period.to < new Date() ? period.to : new Date()));
-        const req0 = c.bookingRequests[0];
         return {
           id: c.id,
           patient: c.customer.name,
@@ -446,11 +308,6 @@ const getChatsReport = async (req, res, next) => {
           longestWaitMinutes: Math.max(0, ...done, ...stillWaiting),
           lateResponses: done.filter((m) => m >= SLA_MINUTES).length,
           unanswered: stillWaiting.length > 0,
-          bookingRequest: req0 ? req0.status : null,
-          notBookedReason: req0 ? req0.notBookedReason : null,
-          leadSource: req0 ? req0.leadSource : null,
-          campaign: req0?.campaign?.name || null,
-          appointments: c._count.bookings,
           notes: c._count.notes,
         };
       })
@@ -476,4 +333,4 @@ const getChatsReport = async (req, res, next) => {
   }
 };
 
-module.exports = { getBookingsReport, getTeamReport, getCampaignsReport, getChatsReport };
+module.exports = { getTeamReport, getCampaignsReport, getChatsReport };

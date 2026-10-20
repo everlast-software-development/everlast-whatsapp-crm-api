@@ -46,8 +46,6 @@ npm run seed       # demo accounts, one per role (development only — refuses N
 | `WHATSAPP_VERIFY_TOKEN`, `WHATSAPP_APP_SECRET` | Meta app-level: webhook verify token and signature secret |
 | `WHATSAPP_TOKEN_*` / `WHATSAPP_ACCESS_TOKEN` | One access token per WhatsApp number, named by that number's `tokenEnvKey` |
 | `STORAGE_PROVIDER` + `CLOUDINARY_*` or `R2_*` | Media storage (`cloudinary` default; `r2` needs `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME`, `R2_PUBLIC_URL`) |
-| `N8N_CLINIC_DASHBOARD_URL`, `N8N_WEBHOOK_SECRET` | Optional — the clinic-day board |
-| `DOK32_DATABASE_URL` | Optional — read-only Dok32 availability |
 | `ADMIN_USERNAME`, `ADMIN_PASSWORD` | Only while running `create-admin` (below); remove the password afterwards |
 
 **Frontend variables** (read at **build** time — redeploy after changing): `NEXT_PUBLIC_API_URL` (the API origin, no `/api` — e.g. `https://api.example.com`) and `NEXT_PUBLIC_SOCKET_URL` (e.g. `https://api.example.com`).
@@ -266,7 +264,7 @@ Shared helpers used across modules.
 | `whatsappClient.js` | Sends messages via the Meta Cloud API. Supports TEXT, IMAGE, VIDEO, AUDIO, and DOCUMENT by building the correct payload shape for each type. |
 | `cloudinary.js` | Configures and exports the Cloudinary SDK instance using credentials from `config.env`. |
 | `audit.js` | Fire-and-forget helper for writing to the `AuditLog` table. Never blocks the main request. |
-| `seedUsers.js` | `npm run seed`: creates one account per role (admin, marketing, agent) if missing; never overwrites an existing one. |
+| `seedUsers.js` | `npm run seed`: creates one account per role (admin, marketing, agent, supervisor) if missing; never overwrites an existing one. |
 | `cloudinaryTest.js` | One-time onboarding script used to verify the Cloudinary integration. Safe to delete after setup. |
 
 ---

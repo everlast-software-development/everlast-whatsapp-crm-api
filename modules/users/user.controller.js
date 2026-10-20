@@ -129,7 +129,7 @@ const updateUser = async (req, res, next) => {
       data.status = status;
     }
     // Deactivate (instead of delete): they can't sign in any more, their open
-    // chats and booking requests go to `handOverTo` (or back to the queue),
+    // chats go to `handOverTo` (or back to the queue),
     // and everything they did stays in the history under their name.
     if (isActive !== undefined) {
       if (targetId === req.user.id && isActive === false) {
@@ -214,11 +214,11 @@ const deleteUser = async (req, res, next) => {
     if (targetId === req.user.id) {
       return next(new AppError("You cannot delete your own account", 400));
     }
-    // Deleting someone who replied, booked or owned chats would blank their
+    // Deleting someone who replied or owned chats would blank their
     // name across the history (and drop their replies from response times).
     if (await hasHistory(targetId)) {
       return next(new AppError(
-        "This person has chats, replies or bookings in the history. Deactivate them instead — they can't sign in, and their work stays credited to them.",
+        "This person has chats or replies in the history. Deactivate them instead — they can't sign in, and their work stays credited to them.",
         409,
         "USER_HAS_HISTORY",
       ));
@@ -311,7 +311,7 @@ const updateMyStatus = async (req, res, next) => {
   }
 };
 
-// ── Self: end of shift — hand my open chats and booking requests over ───────
+// ── Self: end of shift — hand my open chats over ────────────────────────────
 // To a colleague (`toUserId`) or back to the shared queue (none given).
 const handOverMine = async (req, res, next) => {
   try {

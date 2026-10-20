@@ -4,6 +4,7 @@ const { emitToNumber } = require("../../utils/socket");
 const logAudit = require("../../utils/audit");
 const { ASSIGNEE_SELECT, isAssignable } = require("../../utils/conversationAssignment");
 const numbers = require("../../utils/whatsappNumbers");
+const { mayUseNumber } = require("../../middleware/whatsappNumber");
 const { windowState } = require("../../utils/messagingWindow");
 const { sendTypingIndicator } = require("../../utils/whatsappClient");
 
@@ -215,27 +216,26 @@ const sendConversationTyping = async (req, res, next) => {
 
 // ─── GET /api/conversations/:id/profile ─────────────────────────────────────
 // Everything the chat's contact panel shows, in one request: the customer,
-// what flows collected from them (booking requests), the chat's media, docs and
+// what flows collected from them, the chat's media, docs and
 // links, and the campaigns they received.
 const URL_RE = /https?:\/\/[^\s<>"')\]]+/gi;
 // ─── GET /api/conversations/line-counts ─────────────────────────────────────
 // Every active line at once — so an agent sees that another line has unread
-// chats, waiting patients or new booking requests without switching to it.
+// chats or waiting patients without switching to it.
 const getLineCounts = async (req, res, next) => {
   try {
     const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
-    const lines = await prisma.whatsAppNumber.findMany({ where: { isActive: true }, select: { id: true, label: true } });
+    const lines = (await numbers.getAll()).filter((l) => mayUseNumber(req.user, l));
     const ids = lines.map((l) => l.id);
-    const [unread, waiting, requests] = await Promise.all([
+    const [unread, waiting] = await Promise.all([
       prisma.conversation.groupBy({ by: ["whatsappNumberId"], where: { whatsappNumberId: { in: ids }, unreadCount: { gt: 0 }, status: { not: "RESOLVED" } }, _count: { _all: true } }),
       prisma.conversation.groupBy({ by: ["whatsappNumberId"], where: { whatsappNumberId: { in: ids }, awaitingReplySince: { gte: since }, status: { not: "RESOLVED" } }, _count: { _all: true } }),
-      prisma.bookingRequest.groupBy({ by: ["whatsappNumberId"], where: { whatsappNumberId: { in: ids }, status: "NEW" }, _count: { _all: true } }),
     ]);
     const m = (rows) => new Map(rows.map((r) => [r.whatsappNumberId, r._count._all]));
-    const u = m(unread), w = m(waiting), r = m(requests);
+    const u = m(unread), w = m(waiting);
     res.status(200).json({
       success: true,
-      data: lines.map((l) => ({ id: l.id, label: l.label, unreadChats: u.get(l.id) || 0, waiting: w.get(l.id) || 0, newBookingRequests: r.get(l.id) || 0 })),
+      data: lines.map((l) => ({ id: l.id, label: l.label, unreadChats: u.get(l.id) || 0, waiting: w.get(l.id) || 0 })),
     });
   } catch (err) {
     next(err);
@@ -262,7 +262,7 @@ const getConversationProfile = async (req, res, next) => {
     const customerId = conversation.customer.id;
     const notDeleted = { conversationId: id, deletedAt: null };
 
-    const [runs, mediaRows, mediaCounts, linkRows, campaigns, optOut, messageCount, bookings, notes, bookingRequests] = await Promise.all([
+    const [runs, mediaRows, mediaCounts, linkRows, campaigns, optOut, messageCount, notes] = await Promise.all([
       prisma.flowRun.findMany({
         where: { conversationId: id },
         orderBy: { startedAt: "desc" },
@@ -297,29 +297,11 @@ const getConversationProfile = async (req, res, next) => {
         select: { optedOutAt: true, source: true },
       }),
       prisma.message.count({ where: notDeleted }),
-      // Every appointment booked for this patient, from any chat or line.
-      prisma.booking.findMany({
-        where: { customerId },
-        orderBy: { appointmentAt: "desc" },
-        take: 20,
-        include: { createdBy: { select: { id: true, name: true, username: true } } },
-      }),
       prisma.conversationNote.findMany({
         where: { conversationId: id },
         orderBy: { createdAt: "desc" },
         take: 50,
         include: { author: { select: { id: true, name: true, username: true } } },
-      }),
-      prisma.bookingRequest.findMany({
-        where: { conversationId: id },
-        orderBy: { createdAt: "desc" },
-        take: 20,
-        include: {
-          campaign: { select: { id: true, name: true } },
-          claimedBy: { select: { id: true, name: true, username: true } },
-          handledBy: { select: { id: true, name: true, username: true } },
-          bookings: { orderBy: { appointmentAt: "asc" } },
-        },
       }),
     ]);
 
@@ -354,7 +336,7 @@ const getConversationProfile = async (req, res, next) => {
       }
     }
 
-    // What each flow visit collected; the ones with booking details first.
+    // What each flow visit collected; visits that collected nothing are left out.
     const responses = runs
       .map((r) => ({
         id: r.id,
@@ -384,9 +366,7 @@ const getConversationProfile = async (req, res, next) => {
           outcomeBy: conversation.outcomeBy,
           followUpAt: conversation.followUpAt,
         },
-        bookings,
         notes,
-        bookingRequests,
         optOut,
         responses,
         media: mediaRows,

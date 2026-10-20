@@ -58,10 +58,6 @@ const ALL_PERMISSIONS = [
   // Reporting / ops
   "stats:read",
   "audit:read",
-  // The Dok32 clinic-day board (served by n8n). Separate from stats:read
-  // because it shows patient names and appointments, which MARKETING's
-  // reporting access shouldn't include. ADMIN only, via "*".
-  "clinic:read",
   // WhatsApp numbers. `number:read` lists them (every role needs it to render
   // the switcher). `number:use_any` is permission to act as any active number —
   // granted broadly in v1, and the single hook a future per-user number
@@ -71,8 +67,8 @@ const ALL_PERMISSIONS = [
   "number:write",
   // Workspace settings (quiet hours, campaign safety limits). ADMIN only, via "*".
   "settings:write",
-  // The Supervision page: every agent's chats, who is waiting, booking
-  // progress, outcomes. SUPERVISOR and ADMIN.
+  // The Supervision page: every agent's chats, who is waiting, outcomes,
+  // follow-ups. SUPERVISOR and ADMIN.
   "team:supervise",
   // Lifting a patient's opt-out (any source). ADMIN only, via "*": recording
   // an opt-out is easy for everyone, taking one back is not.
@@ -122,7 +118,7 @@ const ROLE_PERMISSIONS = {
   ],
 
   // An agent who also manages the agents. Everything an agent does, plus the
-  // Supervision page (all chats, waiting times, bookings, outcomes) and
+  // Supervision page (all chats, waiting times, outcomes) and
   // read-only campaign results and stats. Settings stay ADMIN-only.
   SUPERVISOR: [
     "conversation:read", "conversation:write", "conversation:assign",

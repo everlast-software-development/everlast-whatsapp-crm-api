@@ -15,9 +15,7 @@ const SLA_MINUTES = 30;
 const RECENT_MS = 24 * 60 * 60 * 1000;
 // Flow runs idle this long without finishing count as dropped halfway.
 const STALLED_FLOW_MS = 60 * 60 * 1000;
-// The answers a booking flow saves (see ContactPanel "Booking requests").
 // A flow run keeps its collected answers under data.answers.
-const BOOKING_KEYS = ["preferred_date", "contact_number"];
 const answersOf = (data) => (data && typeof data === "object" && data.answers && typeof data.answers === "object" ? data.answers : {});
 
 const PERSON = { select: { id: true, name: true, username: true } };
@@ -35,8 +33,6 @@ const numberFilter = (req) => {
   return Number.isInteger(id) ? { whatsappNumberId: id } : {};
 };
 
-const hasBookingAnswers = (data) => BOOKING_KEYS.some((k) => answersOf(data)[k]);
-
 const flowState = (run, now = Date.now()) => {
   if (!run) return null;
   const stalled = run.status === "ACTIVE" && now - new Date(run.updatedAt).getTime() > STALLED_FLOW_MS;
@@ -46,7 +42,6 @@ const flowState = (run, now = Date.now()) => {
     status: stalled ? "STALLED" : run.status,
     // Dropped = left before finishing and wasn't handed to the team.
     droppedHalfway: stalled || run.status === "EXPIRED" || run.status === "STOPPED",
-    bookingRequested: hasBookingAnswers(run.data),
     answers: answersOf(run.data),
     startedAt: run.startedAt,
     updatedAt: run.updatedAt,
@@ -103,14 +98,10 @@ const getOverview = async (req, res, next) => {
     const today = startOfLocalDay(now);
     const where = numberFilter(req);
 
-    const [waitingChats, bookedToday, followUpsDue, flowRunsToday, agents, assignedOpen, repliesToday, responses, openRequests] = await Promise.all([
+    const [waitingChats, followUpsDue, flowRunsToday, agents, assignedOpen, repliesToday, responses] = await Promise.all([
       prisma.conversation.findMany({
         where: { ...where, awaitingReplySince: { not: null }, status: { not: "RESOLVED" } },
         select: { id: true, customerId: true, awaitingReplySince: true, assignedAgentId: true },
-      }),
-      prisma.booking.findMany({
-        where: { status: "BOOKED", createdAt: { gte: today }, ...(where.whatsappNumberId ? { whatsappNumberId: where.whatsappNumberId } : {}) },
-        select: { id: true, createdById: true },
       }),
       prisma.conversation.count({
         where: { ...where, outcome: "FOLLOW_UP", followUpAt: { lte: new Date(today.getTime() + 24 * 60 * 60 * 1000) } },
@@ -138,10 +129,6 @@ const getOverview = async (req, res, next) => {
         _max: { createdAt: true },
       }),
       responseTimes(today, where),
-      prisma.bookingRequest.findMany({
-        where: { status: { in: ["NEW", "IN_PROGRESS"] }, ...(where.whatsappNumberId ? { whatsappNumberId: where.whatsappNumberId } : {}) },
-        select: { id: true, status: true, createdAt: true },
-      }),
     ]);
 
     // Today's waits only; a patient on two lines counts once.
@@ -169,7 +156,6 @@ const getOverview = async (req, res, next) => {
         repliesToday: repliesMap.get(a.id) || 0,
         lastReplyAt: lastReplyMap.get(a.id) || null,
         avgResponseMinutes: avg(mine),
-        bookedToday: bookedToday.filter((b) => b.createdById === a.id).length,
       };
     });
 
@@ -185,12 +171,7 @@ const getOverview = async (req, res, next) => {
           // Waiting over a day: on the "Gone cold" tab, not in the counts above.
           goneCold: goneCold.size,
           longestWaitMinutes: waiting.reduce((m, c) => Math.max(m, c.minutes), 0),
-          bookedToday: bookedToday.length,
-          bookingRequestsOpen: openRequests.length,
-          // Nobody picked them up yet, and those waiting past the target.
-          bookingRequestsNew: openRequests.filter((r) => r.status === "NEW").length,
-          bookingRequestsOverSla: openRequests.filter((r) => workingMinutesBetween(r.createdAt, now) >= SLA_MINUTES).length,
-          droppedHalfwayToday: runs.filter((r) => r.state.droppedHalfway && !r.state.bookingRequested).length,
+          droppedHalfwayToday: runs.filter((r) => r.state.droppedHalfway).length,
           flowsStartedToday: runs.length,
           followUpsDue,
           avgFirstResponseMinutes: avg(answered.map((r) => r.minutes)),
@@ -205,11 +186,11 @@ const getOverview = async (req, res, next) => {
 };
 
 // ─── GET /api/supervision/conversations ─────────────────────────────────────
-// ?filter= waiting | cold | booking | halfway | follow_up | booked | all
+// ?filter= waiting | cold | halfway | follow_up | all
 // &agentId= <id> | unassigned   &numberId=   &search=   &page=
 // One row per PATIENT: if they match on two lines, the newest chat is the row
 // and the others ride along in `otherChats`. Pages count patients.
-const FILTERS = ["waiting", "cold", "booking", "halfway", "follow_up", "booked", "all"];
+const FILTERS = ["waiting", "cold", "halfway", "follow_up", "all"];
 
 const getConversations = async (req, res, next) => {
   try {
@@ -238,27 +219,19 @@ const getConversations = async (req, res, next) => {
     } else if (filter === "follow_up") {
       where.outcome = "FOLLOW_UP";
       orderBy = { followUpAt: "asc" };
-    } else if (filter === "booked") {
-      where.outcome = "BOOKED";
-      orderBy = [{ outcomeAt: "desc" }, { id: "desc" }];
-    } else if (filter === "booking") {
-      // Chats with an open booking request.
-      where.bookingRequests = { some: { status: { in: ["NEW", "IN_PROGRESS"] } } };
     } else if (filter === "halfway") {
-      // Chats whose latest flow run asked for a booking (or stopped halfway)
-      // and that no agent has closed out yet.
+      // Chats whose latest flow run stopped halfway and that no agent has
+      // closed out yet (no outcome, or only a pending follow-up; an older
+      // retired tag counts as closed out).
       const runs = await prisma.$queryRaw`
         SELECT DISTINCT ON (fr."conversationId") fr."conversationId", fr.status, fr.data, fr."updatedAt"
         FROM "FlowRun" fr
         ORDER BY fr."conversationId", fr."startedAt" DESC`;
       const ids = runs
-        .filter((r) => {
-          const st = flowState(r, now.getTime());
-          return st.droppedHalfway && !st.bookingRequested;
-        })
+        .filter((r) => flowState(r, now.getTime()).droppedHalfway)
         .map((r) => r.conversationId);
       where.id = { in: ids };
-      where.OR = [{ outcome: null }, { outcome: { in: ["FOLLOW_UP", "NO_ANSWER"] } }];
+      where.OR = [{ outcome: null }, { outcome: "FOLLOW_UP" }];
     }
 
     const matching = await prisma.conversation.findMany({ where, orderBy, select: { id: true, customerId: true }, take: 5000 });
@@ -284,8 +257,6 @@ const getConversations = async (req, res, next) => {
           assignedAgent: PERSON,
           outcomeBy: PERSON,
           flowRuns: { orderBy: { startedAt: "desc" }, take: 1, include: { flow: { select: { name: true } } } },
-          bookings: { orderBy: { createdAt: "desc" }, take: 1 },
-          bookingRequests: { where: { status: { in: ["NEW", "IN_PROGRESS"] } }, orderBy: { createdAt: "desc" }, take: 1, include: { claimedBy: PERSON } },
           _count: { select: { notes: true } },
         },
       }),
@@ -313,8 +284,6 @@ const getConversations = async (req, res, next) => {
         followUpAt: c.followUpAt,
         followUpOverdue: c.outcome === "FOLLOW_UP" && c.followUpAt && c.followUpAt <= now,
         flow: flowState(c.flowRuns[0], now.getTime()),
-        latestBooking: c.bookings[0] || null,
-        openRequest: c.bookingRequests[0] || null,
         noteCount: c._count.notes,
       };
     };
@@ -351,7 +320,7 @@ const getConversations = async (req, res, next) => {
 // ─── GET /api/supervision/conversations/:id ─────────────────────────────────
 // Everything about one chat for the side panel: latest messages, when the
 // patient waited and how long each reply took, flow progress, outcome,
-// bookings, notes, assignment history.
+// notes, assignment history.
 const getConversationTimeline = async (req, res, next) => {
   try {
     const id = parseInt(req.params.id);
@@ -363,11 +332,6 @@ const getConversationTimeline = async (req, res, next) => {
         whatsappNumber: { select: { id: true, label: true } },
         assignedAgent: PERSON,
         outcomeBy: PERSON,
-        bookings: { orderBy: { createdAt: "desc" }, include: { createdBy: PERSON } },
-        bookingRequests: {
-          orderBy: { createdAt: "desc" },
-          include: { campaign: { select: { id: true, name: true } }, claimedBy: PERSON, handledBy: PERSON, bookings: { orderBy: { appointmentAt: "asc" } } },
-        },
         notes: { orderBy: { createdAt: "desc" }, include: { author: PERSON } },
         flowRuns: { orderBy: { startedAt: "desc" }, take: 5, include: { flow: { select: { name: true } } } },
       },
@@ -444,39 +408,9 @@ const getConversationTimeline = async (req, res, next) => {
   }
 };
 
-// ─── GET /api/supervision/bookings ──────────────────────────────────────────
-// ?from=YYYY-MM-DD&to=YYYY-MM-DD (appointment dates; default today → +30d)
-// &agentId= &status=BOOKED|CANCELLED|all &numberId=
-const getBookings = async (req, res, next) => {
-  try {
-    const parseDay = (v) => (v && /^\d{4}-\d{2}-\d{2}$/.test(v) ? new Date(`${v}T00:00:00Z`) : null);
-    const today = startOfLocalDay();
-    const from = parseDay(req.query.from) || today;
-    const to = parseDay(req.query.to) ? new Date(parseDay(req.query.to).getTime() + 24 * 60 * 60 * 1000) : new Date(today.getTime() + 31 * 24 * 60 * 60 * 1000);
-    const where = { appointmentAt: { gte: from, lt: to } };
-    if (req.query.status !== "all") where.status = req.query.status === "CANCELLED" ? "CANCELLED" : "BOOKED";
-    if (Number.isInteger(parseInt(req.query.agentId))) where.createdById = parseInt(req.query.agentId);
-    if (Number.isInteger(parseInt(req.query.numberId))) where.whatsappNumberId = parseInt(req.query.numberId);
-
-    const data = await prisma.booking.findMany({
-      where,
-      orderBy: { appointmentAt: "asc" },
-      take: 500,
-      include: {
-        customer: { select: { id: true, name: true, phone: true } },
-        createdBy: PERSON,
-        conversation: { select: { id: true, whatsappNumberId: true } },
-      },
-    });
-    res.status(200).json({ success: true, data });
-  } catch (err) {
-    next(err);
-  }
-};
-
 // ─── GET /api/supervision/activity ──────────────────────────────────────────
 // The live feed for the full-screen dashboard: what agents said, who wrote in,
-// hand-offs, assignments, outcomes and bookings — newest first.
+// hand-offs, assignments and outcomes — newest first.
 // ?after=<ISO> returns only what happened since (the page polls with it);
 // ?limit= (default 40, max 100); ?numberId= narrows to one line.
 const FEED_ACTIONS = [
@@ -484,11 +418,7 @@ const FEED_ACTIONS = [
   "conversation.claimed",
   "conversation.status_changed",
   "conversation.outcome_set",
-  "conversation.booking_cancelled",
   "flow.handed_off",
-  "booking_request.created",
-  "booking_request.booked",
-  "booking_request.not_booked",
 ];
 
 // One line of text for a message: templates and interactive messages store
@@ -597,4 +527,4 @@ const getActivity = async (req, res, next) => {
   }
 };
 
-module.exports = { getOverview, getConversations, getConversationTimeline, getBookings, getActivity, SLA_MINUTES, startOfLocalDay, responseTimes, messageText, _flowState: flowState };
+module.exports = { getOverview, getConversations, getConversationTimeline, getActivity, SLA_MINUTES, startOfLocalDay, responseTimes, messageText, _flowState: flowState };
