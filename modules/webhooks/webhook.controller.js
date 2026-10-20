@@ -9,6 +9,7 @@ const safeError = require("../../utils/safeError");
 const { applySuppressions, liftSuppression } = require("../../utils/optOutSuppression");
 const { attributeReply } = require("../../utils/campaignAttribution");
 const flowEngine = require("../../utils/flowEngine");
+const aiAssistant = require("../../utils/aiAssistant");
 const { patientWroteData } = require("../../utils/followUp");
 
 // An unrecognized phone_number_id is almost always a misrouted subscription, and
@@ -675,13 +676,22 @@ const processChangePayload = async (body) => {
     // Campaign automation. After the message is saved and shown, so a flow
     // problem can never lose or delay the customer's message; handleInbound
     // catches its own errors.
-    flowEngine.handleInbound({
+    const flowDone = flowEngine.handleInbound({
       numberId: number.id,
       customer,
       conversation,
       inbound: { rawType, content, replyId, buttonPayload, whatsappMessageId },
       campaignReply,
       optIntent,
+    });
+    // The AI assistant, only for what no flow took (it waits for flowDone).
+    // Returns at once and catches its own errors, like the flow engine.
+    aiAssistant.handleInbound({
+      numberId: number.id,
+      conversation,
+      inbound: { rawType, content },
+      optIntent,
+      flowDone,
     });
     console.log("Webhook: done ✓");
   } catch (err) {

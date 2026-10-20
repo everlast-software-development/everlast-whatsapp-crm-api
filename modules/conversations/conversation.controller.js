@@ -110,6 +110,23 @@ const getConversationCounts = async (req, res, next) => {
   }
 };
 
+// The AI assistant's messages are ordinary BOT messages; what marks them is the
+// AiReply row that sent them (Message has no field for it). Adds
+// aiGenerated: true so the bubble shows its "AI" badge. Never allowed to break
+// the chat: on any failure the messages go out unmarked.
+async function markAiGenerated(messages) {
+  const botIds = messages.filter((m) => m.senderType === "BOT").map((m) => m.id);
+  if (!botIds.length) return messages;
+  try {
+    const rows = await prisma.aiReply.findMany({ where: { replyMessageId: { in: botIds } }, select: { replyMessageId: true } });
+    const ai = new Set(rows.map((r) => r.replyMessageId));
+    return messages.map((m) => (ai.has(m.id) ? { ...m, aiGenerated: true } : m));
+  } catch (err) {
+    console.error("Messages: AI labels unavailable:", err.message);
+    return messages;
+  }
+}
+
 const getConversationMessages = async (req, res, next) => {
   try {
     const conversationId = parseInt(req.params.id);
@@ -144,7 +161,7 @@ const getConversationMessages = async (req, res, next) => {
 
     res.status(200).json({
       success: true,
-      data: messages,
+      data: await markAiGenerated(messages),
       pagination: { total, page, limit, totalPages: Math.ceil(total / limit) },
     });
   } catch (err) {

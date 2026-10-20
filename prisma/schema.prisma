@@ -846,3 +846,68 @@ model ConversationNote {
 
   @@index([conversationId, createdAt])
 }
+
+// ── AI assistant ────────────────────────────────────────────────────────────
+
+enum KnowledgeStatus {
+  DRAFT
+  APPROVED
+  ARCHIVED
+}
+
+// Clinic-approved content the AI assistant may answer from (treatments,
+// pre/post care, clinic info). Only APPROVED articles are searchable.
+model KnowledgeArticle {
+  id           Int              @id @default(autoincrement())
+  title        String
+  category     String?
+  // As staff wrote it: { summary, before, after, downtime, notSuitableFor, faq, other }
+  sections     Json             @default("{}")
+  status       KnowledgeStatus  @default(DRAFT)
+  approvedById Int?
+  approvedAt   DateTime?
+  createdById  Int?
+  updatedById  Int?
+  // When its chunks were last embedded (null = needs embedding).
+  embeddedAt   DateTime?
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+  chunks       KnowledgeChunk[]
+
+  @@index([status])
+}
+
+// One section of an article, embedded for search (bge-m3, 1024 dims).
+model KnowledgeChunk {
+  id        Int                          @id @default(autoincrement())
+  articleId Int
+  article   KnowledgeArticle             @relation(fields: [articleId], references: [id], onDelete: Cascade)
+  section   String
+  content   String
+  embedding Unsupported("vector(1024)")?
+  createdAt DateTime                     @default(now())
+
+  @@index([articleId])
+}
+
+// Every AI assistant turn: what it did and why — for review, reports and cost.
+model AiReply {
+  id               Int      @id @default(autoincrement())
+  conversationId   Int
+  whatsappNumberId Int
+  inboundMessageId Int?
+  replyMessageId   Int?
+  model            String
+  // ANSWERED | HANDED_OFF | URGENT | ERROR
+  outcome          String
+  reason           String?
+  chunkIds         Int[]
+  inputTokens      Int?
+  outputTokens     Int?
+  latencyMs        Int?
+  error            String?
+  createdAt        DateTime @default(now())
+
+  @@index([conversationId, createdAt])
+  @@index([createdAt])
+}

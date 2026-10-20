@@ -11,6 +11,7 @@
 const prisma = require("../config/prisma");
 const AppError = require("./AppError");
 const { parsePhoneNumberFromString } = require("libphonenumber-js");
+const aiProviderSetting = require("./aiProviderSetting");
 
 const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
 
@@ -83,6 +84,65 @@ const SETTINGS = {
       return { phones };
     },
   },
+
+  // The AI assistant that answers patients from the knowledge base
+  // (utils/aiAssistant.js). Off until an admin turns it on for chosen lines.
+  // The *Ar texts are sent instead when the patient writes in Arabic; empty =
+  // the English text is used for everyone.
+  aiAssistant: {
+    defaults: {
+      enabled: false,
+      numberIds: [],
+      assistantName: "Everlast Assistant",
+      handoffMessage: "Thank you! I'm connecting you with our team now — someone will reply shortly.",
+      urgentMessage:
+        "I'm sorry to hear that. I'm alerting our medical team right now so they can help you as soon as possible. If it's an emergency, please call 999 or go to the nearest emergency department.",
+      handoffMessageAr: "شكراً لك! سأحوّلك الآن إلى فريقنا، وسيرد عليك أحد الزملاء قريباً.",
+      urgentMessageAr:
+        "نأسف لسماع ذلك. سأنبّه فريقنا الطبي الآن ليساعدك في أقرب وقت ممكن. إذا كانت حالة طارئة، يرجى الاتصال على 999 أو التوجه إلى أقرب قسم طوارئ.",
+      outOfHoursNote: "",
+      quietAfterAgentReplyHours: 24,
+    },
+    normalise(v) {
+      if (!v || typeof v !== "object") throw new AppError("AI assistant settings must be an object", 400);
+      const text = (field, label, { required = false, max = 1000 } = {}) => {
+        const s = String(v[field] ?? "").trim();
+        if (required && !s) throw new AppError(`${label} can't be empty`, 400);
+        if (s.length > max) throw new AppError(`${label} must be at most ${max} characters`, 400);
+        return s;
+      };
+      if (!Array.isArray(v.numberIds)) throw new AppError("numberIds must be a list of line ids", 400);
+      const numberIds = [...new Set(v.numberIds.map(Number))];
+      if (numberIds.some((id) => !Number.isInteger(id) || id <= 0) || numberIds.length > 50) {
+        throw new AppError("numberIds must be WhatsApp line ids", 400);
+      }
+      const hours = Number(v.quietAfterAgentReplyHours ?? 24);
+      if (!Number.isInteger(hours) || hours < 0 || hours > 168) {
+        throw new AppError("Quiet after a team reply must be a whole number of hours between 0 and 168", 400);
+      }
+      return {
+        enabled: v.enabled === true,
+        numberIds,
+        assistantName: text("assistantName", "The assistant's name", { required: true, max: 60 }),
+        handoffMessage: text("handoffMessage", "The hand-over message", { required: true }),
+        urgentMessage: text("urgentMessage", "The urgent message", { required: true }),
+        handoffMessageAr: text("handoffMessageAr", "The Arabic hand-over message"),
+        urgentMessageAr: text("urgentMessageAr", "The Arabic urgent message"),
+        outOfHoursNote: text("outOfHoursNote", "The out-of-hours note"),
+        quietAfterAgentReplyHours: hours,
+      };
+    },
+  },
+
+  // Which Cloudflare account and models the AI assistant uses, and the numbers
+  // that shape its answers (Settings → AI assistant → AI model & Cloudflare).
+  // The token is stored encrypted and never sent to the client — see
+  // utils/aiProviderSetting.js. Normalised against what is stored, so a save
+  // without a token keeps the saved one.
+  aiProvider: {
+    defaults: aiProviderSetting.DEFAULTS,
+    normalise: aiProviderSetting.normalise,
+  },
 };
 
 const cache = new Map();
@@ -109,7 +169,7 @@ function refreshIfStale() {
 const testOverrides = new Map();
 function overrideSettingForTest(key, value) {
   if (value === undefined) testOverrides.delete(key);
-  else testOverrides.set(key, SETTINGS[key].normalise(value));
+  else testOverrides.set(key, SETTINGS[key].normalise(value, testOverrides.get(key)));
 }
 
 function getSetting(key) {
@@ -124,9 +184,23 @@ function getSetting(key) {
   return defaults ? { ...defaults, ...saved } : saved;
 }
 
+/**
+ * The stored value only — no defaults merged in; undefined when never saved.
+ * (The AI provider's precedence needs to know what was actually set.)
+ */
+function getSavedSetting(key) {
+  if (!SETTINGS[key]) throw new Error(`Unknown setting ${key}`);
+  if (testOverrides.has(key)) return testOverrides.get(key);
+  if (process.env.APP_SETTINGS_IGNORE_SAVED === "1") return undefined;
+  refreshIfStale();
+  return cache.get(key);
+}
+
 async function saveSetting(key, value, user) {
   if (!SETTINGS[key]) throw new AppError(`Unknown setting "${key}"`, 400);
-  const clean = SETTINGS[key].normalise(value);
+  // Normalised against the stored value, for settings that keep fields the
+  // request leaves out (the AI provider's token).
+  const clean = SETTINGS[key].normalise(value, cache.get(key));
   await prisma.appSetting.upsert({
     where: { key },
     update: { value: clean, updatedById: user?.id ?? null },
@@ -136,4 +210,4 @@ async function saveSetting(key, value, user) {
   return clean;
 }
 
-module.exports = { loadSettings, getSetting, saveSetting, overrideSettingForTest, SETTING_KEYS: Object.keys(SETTINGS) };
+module.exports = { loadSettings, getSetting, getSavedSetting, saveSetting, overrideSettingForTest, SETTING_KEYS: Object.keys(SETTINGS) };

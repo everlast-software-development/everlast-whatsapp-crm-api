@@ -134,7 +134,10 @@ const DEFAULT_RETRY = {
 // (FLOW_TYPING_PAUSE_MS overrides it, e.g. 0 in tests.)
 const TYPING_PAUSE_MS = Number(process.env.FLOW_TYPING_PAUSE_MS ?? 1200);
 
-async function sendBot(ctx, { kind, text, mediaType, mediaUrl, footer, header, buttons, list, prebuilt, carousel }) {
+// `ai`: written by the AI assistant (utils/aiAssistant.js) — the live bubble
+// carries aiGenerated so the inbox shows its "AI" badge straight away (the
+// saved link is the AiReply row; see getConversationMessages).
+async function sendBot(ctx, { kind, text, mediaType, mediaUrl, footer, header, buttons, list, prebuilt, carousel, ai = false }) {
   const { conversation, customer, numberId } = ctx;
   const credentials = await numbers.getCredentials(numberId);
 
@@ -230,11 +233,49 @@ async function sendBot(ctx, { kind, text, mediaType, mediaUrl, footer, header, b
     // starts that clock again).
     data: { lastMessage: preview, lastMessageAt: new Date(), lastSenderType: "BOT", awaitingReplySince: null },
   });
-  emitToNumber(numberId, "message.created", { message, conversationId: conversation.id });
+  emitToNumber(numberId, "message.created", { message: ai ? { ...message, aiGenerated: true } : message, conversationId: conversation.id });
   emitToNumber(numberId, "conversation.updated", { conversationId: conversation.id });
 
-  if (sendError) throw new Error(`WhatsApp refused the message (${sendError})`);
+  if (sendError) {
+    const err = new Error(`WhatsApp refused the message (${sendError})`);
+    err.messageId = message.id; // saved (FAILED) all the same
+    throw err;
+  }
   return message;
+}
+
+/**
+ * Hand a chat to the team: open it (assigned to `agent` when given), alert
+ * every agent who can reply on the line ("flow.handoff", shown by the
+ * frontend's HandoffNotifier) and start the patient's "waiting for a person"
+ * clock. `alert` is merged into the event: who handed over and why (a flow's
+ * name and the patient's interest; the AI assistant's reason and summary).
+ * Used by the flow Assign step and by the AI assistant.
+ */
+async function handToTeam(ctx, { agent = null, alert = {} } = {}) {
+  await prisma.conversation.update({
+    where: { id: ctx.conversation.id },
+    data: { status: "OPEN", ...(agent ? { assignedAgentId: agent.id } : {}) },
+  });
+  if (agent) {
+    emitToNumber(ctx.numberId, "conversation.assigned", {
+      conversationId: ctx.conversation.id, agentId: agent.id, agentUsername: agent.username,
+    });
+  }
+  emitToNumber(ctx.numberId, "conversation.updated", { conversationId: ctx.conversation.id });
+  // Tell the team, wherever they are in the CRM, that a customer is waiting
+  // for a person — with what they were looking at.
+  emitToNumberStaff(ctx.numberId, "flow.handoff", {
+    conversationId: ctx.conversation.id,
+    customerName: ctx.customer.name || null,
+    customerPhone: ctx.customer.phone,
+    agentId: agent?.id ?? null,
+    agentUsername: agent?.username ?? null,
+    at: new Date().toISOString(),
+    ...alert,
+  });
+  // From now on the patient is waiting for a person.
+  await handedToTeam(ctx.conversation.id);
 }
 
 async function finish(run, status, extra = {}) {
@@ -370,28 +411,10 @@ async function walk(ctx, run, graph, startNodeId) {
           const user = await prisma.user.findUnique({ where: { id: d.agentId } });
           agent = isAssignable(user) ? user : null;
         }
-        await prisma.conversation.update({
-          where: { id: ctx.conversation.id },
-          data: { status: "OPEN", ...(agent ? { assignedAgentId: agent.id } : {}) },
-        });
-        if (agent) {
-          emitToNumber(ctx.numberId, "conversation.assigned", {
-            conversationId: ctx.conversation.id, agentId: agent.id, agentUsername: agent.username,
-          });
-        }
-        emitToNumber(ctx.numberId, "conversation.updated", { conversationId: ctx.conversation.id });
-        // Tell the team, wherever they are in the CRM, that a customer is
-        // waiting for a person — with what they were looking at.
         const flowRow = await prisma.flow.findUnique({ where: { id: run.flowId }, select: { name: true } });
-        emitToNumberStaff(ctx.numberId, "flow.handoff", {
-          conversationId: ctx.conversation.id,
-          customerName: ctx.customer.name || null,
-          customerPhone: ctx.customer.phone,
-          flowName: flowRow?.name || "Flow",
-          interest: data.answers.offer || data.answers.category || null,
-          agentId: agent?.id ?? null,
-          agentUsername: agent?.username ?? null,
-          at: new Date().toISOString(),
+        await handToTeam(ctx, {
+          agent,
+          alert: { flowName: flowRow?.name || "Flow", interest: data.answers.offer || data.answers.category || null },
         });
         logAudit({
           action: "flow.handed_off",
@@ -401,8 +424,6 @@ async function walk(ctx, run, graph, startNodeId) {
           details: { flowRunId: run.id, flowId: run.flowId, agentId: agent?.id ?? null },
         });
         data.path.push({ node: node.id, handedOffTo: agent?.username ?? "team", at: new Date().toISOString() });
-        // From now on the patient is waiting for a person.
-        await handedToTeam(ctx.conversation.id);
         return finish(run, "HANDED_OFF", { data });
       }
       case "end": {
@@ -882,13 +903,19 @@ async function resumeFromTap(ctx, tapped, active) {
  * @param inbound { rawType, content, buttonPayload, replyId }
  * @param campaignReply  attributeReply()'s result, or null
  * @param optIntent      "OUT" | "IN" | null
+ * @returns a promise of { consumed }: true when a flow took the message (a tap
+ *   on a flow's button, a campaign answer that started a flow, STOP, or any
+ *   message while a run is in progress) — the AI assistant then stays out.
+ *   Never rejects.
  */
 function handleInbound({ numberId, customer, conversation, inbound, campaignReply, optIntent }) {
+  let consumed = false;
   return serialize(conversation.id, async () => {
     // typingFor: the customer's message the first reply will show "typing…" on.
     const ctx = { numberId, customer, conversation, typingFor: inbound.whatsappMessageId || null };
 
     if (optIntent === "OUT") {
+      consumed = true;
       await endActiveRuns(conversation.id, "STOPPED");
       return;
     }
@@ -902,8 +929,14 @@ function handleInbound({ numberId, customer, conversation, inbound, campaignRepl
 
     // 1. A tap on one of OUR buttons — on ANY message the flow sent, not only
     // the latest: people scroll up and tap an old menu or card. See resumeFromTap.
+    // Anything said while a run is in progress belongs to the flow (an answer,
+    // or for the agents), never to the AI assistant.
+    if (active) consumed = true;
     const tapped = parseReplyId(inbound.replyId);
-    if (tapped) return resumeFromTap(ctx, tapped, active);
+    if (tapped) {
+      consumed = true;
+      return resumeFromTap(ctx, tapped, active);
+    }
 
     // 2. A fresh answer to a campaign that has a flow: (re)start. While a run is
     // in progress only a new template-button tap restarts it — a typed message
@@ -912,6 +945,7 @@ function handleInbound({ numberId, customer, conversation, inbound, campaignRepl
     const mayStart = campaignReply && (!active || inbound.rawType === "button");
     const startMatch = mayStart ? await matchCampaignStart(campaignReply.campaign.id, inbound) : null;
     if (startMatch) {
+      consumed = true;
       await endActiveRuns(conversation.id, "STOPPED"); // a new tap on the campaign replaces any older run
       const data = emptyData();
       data.path.push({ node: startMatch.triggerId, choice: startMatch.label, at: new Date().toISOString() });
@@ -951,9 +985,14 @@ function handleInbound({ numberId, customer, conversation, inbound, campaignRepl
       const run = await prisma.flowRun.update({ where: { id: active.id }, data: { data } });
       return safeWalk(ctx, run, graph, nextNodeId(graph, node.id, "next"));
     }
-  }).catch((err) => {
-    console.error("[flow] inbound handling failed (message kept):", err.message);
-  });
+  }).then(
+    () => ({ consumed }),
+    (err) => {
+      console.error("[flow] inbound handling failed (message kept):", err.message);
+      // Unknown state: safer that nothing else answers this message.
+      return { consumed: true };
+    },
+  );
 }
 
 // Which Start output a campaign answer takes, if the campaign has a live flow.
@@ -988,4 +1027,9 @@ async function matchCampaignStart(campaignId, inbound) {
   return null;
 }
 
-module.exports = { handleInbound, handOffOnAgentReply, expireStaleRuns, parseAnswer, interpolate };
+module.exports = {
+  handleInbound, handOffOnAgentReply, expireStaleRuns, parseAnswer, interpolate,
+  // For the AI assistant (utils/aiAssistant.js): the same send, hand-off and
+  // per-conversation ordering as flows.
+  sendBot, handToTeam, serialize,
+};
