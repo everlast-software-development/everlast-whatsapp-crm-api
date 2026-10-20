@@ -18,8 +18,12 @@ const HEADER = "x-whatsapp-number-id";
 //
 // When per-brand teams become real, add a UserWhatsAppNumber join table and
 // change ONLY this function. Nothing else inspects number access.
+//
+// The one exception is the docs demo line: demo accounts get only it, everyone
+// else never sees it (see isDemoNumber in utils/whatsappNumbers.js).
 function mayUseNumber(user, number) {
   if (!user) return false;
+  if (numbers.isDemoNumber(number) !== numbers.isDemoUser(user)) return false;
   return roleHasPermission(user.role, "number:use_any");
 }
 
@@ -39,7 +43,9 @@ function resolveNumber(opts = {}) {
         req.query.whatsappNumberId ??
         (req.body && req.body.whatsappNumberId);
 
-      if (allowAll && String(raw).toLowerCase() === "all") {
+      const wantsAll = allowAll && String(raw).toLowerCase() === "all";
+      // "All lines" spans real patients, so a demo account gets its own line instead.
+      if (wantsAll && !numbers.isDemoUser(req.user)) {
         req.number = null;
         req.numberId = null;
         req.numberScope = "ALL";
@@ -50,8 +56,8 @@ function resolveNumber(opts = {}) {
       req.numberScope = "NUMBER";
 
       let number;
-      if (raw === undefined || raw === null || raw === "") {
-        number = await numbers.getDefault();
+      if (wantsAll || raw === undefined || raw === null || raw === "") {
+        number = await numbers.getDefaultFor(req.user);
         if (!number) {
           if (optional) {
             req.number = null;

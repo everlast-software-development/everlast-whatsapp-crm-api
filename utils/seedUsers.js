@@ -20,6 +20,9 @@ const SEED_USERS = [
   { username: "admin", name: "Admin", role: "ADMIN", password: "Admin@1234" },
   { username: "marketing", name: "Marketing", role: "MARKETING", password: "Marketing@1234" },
   { username: "agent", name: "Agent", role: "AGENT", password: "Agent@1234" },
+  // An agent who also supervises: the inbox like an agent, plus the
+  // Supervision page, reports and the live wall.
+  { username: "supervisor", name: "Supervisor", role: "SUPERVISOR", password: "Supervisor@1234" },
 ];
 
 const seed = async () => {

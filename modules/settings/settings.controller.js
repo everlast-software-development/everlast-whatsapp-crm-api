@@ -96,7 +96,8 @@ const numberView = (n) => ({
 // ─── GET /api/settings/numbers ──────────────────────────────────────────────
 const listNumbers = async (req, res, next) => {
   try {
-    const rows = await prisma.whatsAppNumber.findMany({ orderBy: [{ isDefault: "desc" }, { createdAt: "asc" }] });
+    const rows = (await prisma.whatsAppNumber.findMany({ orderBy: [{ isDefault: "desc" }, { createdAt: "asc" }] }))
+      .filter((n) => numbers.isDemoNumber(n) === numbers.isDemoUser(req.user));
     const running = await prisma.campaign.groupBy({
       by: ["whatsappNumberId"],
       where: { status: { in: ["RUNNING", "SCHEDULED", "PAUSED"] } },

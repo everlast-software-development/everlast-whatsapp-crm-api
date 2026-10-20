@@ -26,6 +26,17 @@ const { getApiVersion } = require("./whatsappClient");
 // name JWT_SECRET, DATABASE_URL or any other unrelated secret.
 const TOKEN_ENV_KEY_RE = /^WHATSAPP_(ACCESS_TOKEN|TOKEN_[A-Z0-9_]{1,40})$/;
 
+// The docs demo line (`npm run seed:demo`) is a mock-up for the documentation
+// screenshots. Only the docs_* demo accounts may use it, and they may use
+// nothing else (middleware/whatsappNumber.js mayUseNumber) — so it never shows
+// in real staff's switcher, and a demo login never reaches a real patient.
+const DEMO_PHONE_NUMBER_ID = "docs-demo-pnid-0000";
+const DEMO_USERNAME_PREFIX = "docs_";
+
+const isDemoNumber = (number) => number?.phoneNumberId === DEMO_PHONE_NUMBER_ID;
+const isDemoUser = (user) =>
+  typeof user?.username === "string" && user.username.startsWith(DEMO_USERNAME_PREFIX);
+
 const CACHE_TTL_MS = 60_000;
 
 let byId = new Map();
@@ -49,13 +60,13 @@ async function load() {
   for (const row of rows) {
     nextById.set(row.id, row);
     nextByPnid.set(row.phoneNumberId, row);
-    if (row.isDefault && row.isActive) nextDefault = row.id;
+    if (row.isDefault && row.isActive && !isDemoNumber(row)) nextDefault = row.id;
   }
 
   // No explicit default (or it was deactivated): fall back to the first active
   // number so the app still has somewhere to send from rather than 500ing.
   if (nextDefault === null) {
-    const firstActive = rows.find((r) => r.isActive);
+    const firstActive = rows.find((r) => r.isActive && !isDemoNumber(r));
     nextDefault = firstActive ? firstActive.id : null;
   }
 
@@ -103,6 +114,14 @@ async function getByPhoneNumberId(phoneNumberId) {
 async function getDefault() {
   await ensureLoaded();
   return defaultId === null ? null : byId.get(defaultId) || null;
+}
+
+// The line a user lands on when they have not picked one: the demo line for a
+// demo account (the business default is off-limits to them), else the default.
+async function getDefaultFor(user) {
+  if (!isDemoUser(user)) return getDefault();
+  const demo = await getByPhoneNumberId(DEMO_PHONE_NUMBER_ID);
+  return demo && demo.isActive ? demo : null;
 }
 
 // Resolves the row plus its secret. This is the ONLY place a token is read.
@@ -250,10 +269,15 @@ module.exports = {
   getById,
   getByPhoneNumberId,
   getDefault,
+  getDefaultFor,
   getCredentials,
   getTokenForWaba,
   assertTemplateUsable,
   invalidate,
   warmup,
   TOKEN_ENV_KEY_RE,
+  DEMO_PHONE_NUMBER_ID,
+  DEMO_USERNAME_PREFIX,
+  isDemoNumber,
+  isDemoUser,
 };

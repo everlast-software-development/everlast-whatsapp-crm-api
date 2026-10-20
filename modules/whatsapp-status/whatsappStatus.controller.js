@@ -1,6 +1,7 @@
 const axios = require("axios");
 const AppError = require("../../utils/AppError");
 const numbers = require("../../utils/whatsappNumbers");
+const { mayUseNumber } = require("../../middleware/whatsappNumber");
 const { getApiVersion } = require("../../utils/whatsappClient");
 
 // Fields documented on Meta's WhatsApp Business phone number object that
@@ -127,7 +128,7 @@ const getConfiguredNumbers = async (req, res, next) => {
     // The default number — the business's main line — first, then the rest in
     // the order they were added. The switcher groups accounts in the order it
     // first meets them, so this also puts the main number's account on top.
-    const rows = [...(await numbers.getAll())].sort(
+    const rows = (await numbers.getAll()).filter((n) => mayUseNumber(req.user, n)).sort(
       (a, b) => Number(b.isDefault) - Number(a.isDefault) || a.id - b.id,
     );
 
