@@ -640,6 +640,11 @@ const processChangePayload = async (body) => {
     // A patient writing to a chat marked Resolved reopens it, so a new question
     // can never sit unseen in the resolved pile.
     const reopening = conversation.status === "RESOLVED";
+    // A patient writing again also clears the chat's outcome: a pending
+    // follow-up is moot (they came back on their own), and an old retired tag
+    // (Not interested / No answer / Booked) would only be stale. Any message
+    // counts, a STOP keyword included: opt-out is recorded above, separately.
+    const clearingOutcome = Boolean(conversation.outcome || conversation.followUpAt);
 
     await prisma.conversation.update({
       where: { id: conversation.id },
@@ -651,13 +656,35 @@ const processChangePayload = async (body) => {
         lastCustomerMessageAt: new Date(),
         // Starts the "waiting for a reply" clock if it isn't running already.
         ...patientWroteData(conversation),
-        // Reopening a resolved chat starts fresh: the wait from now, and the
-        // previous outcome (kept in the history) no longer shows as current.
-        ...(reopening
-          ? { status: "OPEN", awaitingReplySince: new Date(), outcome: null, outcomeAt: null, outcomeById: null, followUpAt: null }
+        // The previous outcome (kept in the history) no longer shows as current.
+        ...(reopening || clearingOutcome
+          ? { outcome: null, outcomeAt: null, outcomeById: null, followUpAt: null, followUpNotifiedAt: null }
           : {}),
+        // Reopening a resolved chat starts fresh: the wait from now.
+        ...(reopening ? { status: "OPEN", awaitingReplySince: new Date() } : {}),
       },
     });
+
+    if (clearingOutcome) {
+      emitToNumber(number.id, "conversation.outcome", { conversationId: conversation.id, outcome: null });
+    }
+    // A reopen is recorded below (with the previous outcome); otherwise the
+    // clear gets its own entry, actorless like the reopen.
+    if (clearingOutcome && !reopening) {
+      logAudit({
+        action: "conversation.outcome_set",
+        actor: null,
+        targetType: "conversation",
+        targetId: conversation.id,
+        details: {
+          outcome: null,
+          previousOutcome: conversation.outcome || null,
+          followUpAt: null,
+          previousFollowUpAt: conversation.followUpAt || null,
+          reason: "customer wrote",
+        },
+      });
+    }
 
     if (reopening) {
       emitToNumber(number.id, "conversation.status_changed", { conversationId: conversation.id, status: "OPEN" });

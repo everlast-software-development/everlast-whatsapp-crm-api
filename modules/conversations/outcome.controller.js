@@ -3,12 +3,18 @@ const AppError = require("../../utils/AppError");
 const logAudit = require("../../utils/audit");
 const { emitToNumber } = require("../../utils/socket");
 const { roleHasPermission } = require("../../config/permissions");
-const br = require("../../utils/bookingRequests");
 
-// How a chat ended up, set by the agent handling it, plus the appointment when
-// it was BOOKED and staff-only notes. What the Supervision page reports on.
-
-const OUTCOMES = ["BOOKED", "NOT_INTERESTED", "FOLLOW_UP", "NO_ANSWER"];
+// The chat's outcome, set by the agent handling it, plus staff-only notes.
+// The only outcome left is "Follow up" (a date: the chat goes to the
+// Follow-ups tab and jobs/followUpReminders.js reminds whoever owns it); the
+// other choice is clearing it. A patient writing again clears it on its own
+// (see the webhook).
+//
+// NOT_INTERESTED, NO_ANSWER and BOOKED are still in the database enum because
+// older chats may carry them, but they can no longer be chosen. A chat holding
+// one can be set to Follow up or cleared like any other.
+const OUTCOMES = ["FOLLOW_UP"];
+const RETIRED_OUTCOMES = ["NOT_INTERESTED", "NO_ANSWER", "BOOKED"];
 const PERSON = { select: { id: true, name: true, username: true } };
 
 const validDate = (v) => {
@@ -30,17 +36,17 @@ const outcomeView = (c) => ({
   outcomeAt: c.outcomeAt,
   outcomeBy: c.outcomeBy || null,
   followUpAt: c.followUpAt,
-  bookings: c.bookings || [],
 });
 
 // ─── PUT /api/conversations/:id/outcome ─────────────────────────────────────
-// { outcome: "BOOKED", booking: { appointmentAt, service?, note? } }
-// { outcome: "FOLLOW_UP", followUpAt }   { outcome: "NOT_INTERESTED" | "NO_ANSWER" }
-// { outcome: null } clears it.
+// { outcome: "FOLLOW_UP", followUpAt }   { outcome: null } clears it.
 const setOutcome = async (req, res, next) => {
   try {
     const conversation = await loadConversation(req);
     const outcome = req.body.outcome ?? null;
+    if (RETIRED_OUTCOMES.includes(outcome)) {
+      return next(new AppError("That outcome is no longer used. Set a follow-up date, or clear the outcome", 400));
+    }
     if (outcome !== null && !OUTCOMES.includes(outcome)) {
       return next(new AppError(`Outcome must be one of ${OUTCOMES.join(", ")}`, 400));
     }
@@ -49,41 +55,6 @@ const setOutcome = async (req, res, next) => {
     // followUpNotifiedAt reset: a new follow-up date gets its own reminder.
     const data = { outcome, outcomeAt: outcome ? now : null, outcomeById: outcome ? req.user.id : null, followUpAt: null, followUpNotifiedAt: null };
 
-    // "Not interested", "No answer" or clearing the outcome would contradict
-    // appointments that are still booked — those are cancelled first, on purpose.
-    if (outcome === "NOT_INTERESTED" || outcome === "NO_ANSWER" || outcome === null) {
-      const live = await prisma.booking.count({ where: { conversationId: conversation.id, status: "BOOKED" } });
-      if (live > 0) {
-        return next(new AppError(
-          `This chat has ${live} booked appointment${live === 1 ? "" : "s"}. Cancel ${live === 1 ? "it" : "them"} first (contact panel → Bookings) if the patient no longer wants to come.`,
-          409,
-          "HAS_APPOINTMENTS",
-        ));
-      }
-    }
-
-    // Booked is recorded through the chat's booking request (the open one, or a
-    // new one) so every appointment has a request, a campaign and a history.
-    // Accepts several appointments, or the older single `booking`.
-    if (outcome === "BOOKED") {
-      const list = Array.isArray(req.body.appointments)
-        ? req.body.appointments
-        : req.body.booking
-          ? [req.body.booking]
-          : [];
-      br.cleanAppointments(list); // validate before creating anything
-      let request = await prisma.bookingRequest.findFirst({
-        where: { conversationId: conversation.id, status: { in: br.OPEN } },
-        orderBy: { createdAt: "desc" },
-      });
-      if (!request) request = await br.createForConversation(conversation, {}, req.user);
-      await br.bookRequest(request.id, list, req.user, { conversationId: conversation.id }, req.body.source || null);
-      const after = await prisma.conversation.findUnique({
-        where: { id: conversation.id },
-        include: { outcomeBy: PERSON, bookings: { orderBy: { createdAt: "desc" }, include: { createdBy: PERSON } } },
-      });
-      return res.status(200).json({ success: true, data: outcomeView(after) });
-    }
     if (outcome === "FOLLOW_UP") {
       const followUpAt = validDate(req.body.followUpAt);
       if (!followUpAt) return next(new AppError("Choose when to follow up", 400));
@@ -93,18 +64,8 @@ const setOutcome = async (req, res, next) => {
     const updated = await prisma.conversation.update({
       where: { id: conversation.id },
       data,
-      include: { outcomeBy: PERSON, bookings: { orderBy: { createdAt: "desc" }, include: { createdBy: PERSON } } },
+      include: { outcomeBy: PERSON },
     });
-
-    // The open booking request follows the chat: "Not interested" / "No
-    // answer" close it with that reason, so the Bookings queue and the reports
-    // tell the same story as the chat.
-    if (outcome === "NOT_INTERESTED" || outcome === "NO_ANSWER") {
-      const open = await prisma.bookingRequest.findMany({ where: { conversationId: conversation.id, status: { in: br.OPEN } }, select: { id: true } });
-      for (const r of open) {
-        await br.closeNotBooked(r.id, { reason: outcome, note: "Closed from the chat outcome" }, req.user, {}, { syncOutcome: false });
-      }
-    }
 
     logAudit({
       action: "conversation.outcome_set",
@@ -119,51 +80,6 @@ const setOutcome = async (req, res, next) => {
     });
     emitToNumber(conversation.whatsappNumberId, "conversation.outcome", { conversationId: conversation.id, outcome });
     emitToNumber(conversation.whatsappNumberId, "conversation.updated", { conversationId: conversation.id });
-    res.status(200).json({ success: true, data: outcomeView(updated) });
-  } catch (err) {
-    next(err);
-  }
-};
-
-// ─── POST /api/conversations/:id/bookings/:bookingId/cancel ─────────────────
-// The appointment was cancelled. Kept in the history as CANCELLED; if it was
-// the chat's only live booking, the chat's outcome goes back to none.
-const cancelBooking = async (req, res, next) => {
-  try {
-    const conversation = await loadConversation(req);
-    const bookingId = parseInt(req.params.bookingId);
-    const { count } = await prisma.booking.updateMany({
-      where: { id: bookingId, conversationId: conversation.id, status: "BOOKED" },
-      data: { status: "CANCELLED", cancelledAt: new Date() },
-    });
-    if (count === 0) return next(new AppError("Booking not found or already cancelled", 404));
-    const cancelled = await prisma.booking.findUnique({ where: { id: bookingId }, select: { requestId: true } });
-    if (cancelled?.requestId) {
-      const stillBooked = await prisma.booking.count({ where: { requestId: cancelled.requestId, status: "BOOKED" } });
-      if (stillBooked === 0) {
-        // Nothing booked any more: back on the agent's list to rebook or close.
-        await prisma.bookingRequest.updateMany({
-          where: { id: cancelled.requestId, status: "BOOKED" },
-          data: { status: "IN_PROGRESS", handledById: null, handledAt: null },
-        });
-      }
-    }
-    const live = await prisma.booking.count({ where: { conversationId: conversation.id, status: "BOOKED" } });
-    if (live === 0 && conversation.outcome === "BOOKED") {
-      await prisma.conversation.update({ where: { id: conversation.id }, data: { outcome: null, outcomeAt: null, outcomeById: null } });
-    }
-    logAudit({
-      action: "conversation.booking_cancelled",
-      actor: req.user,
-      targetType: "conversation",
-      targetId: conversation.id,
-      details: { bookingId },
-    });
-    const updated = await prisma.conversation.findUnique({
-      where: { id: conversation.id },
-      include: { outcomeBy: PERSON, bookings: { orderBy: { createdAt: "desc" }, include: { createdBy: PERSON } } },
-    });
-    emitToNumber(conversation.whatsappNumberId, "conversation.outcome", { conversationId: conversation.id, outcome: updated.outcome });
     res.status(200).json({ success: true, data: outcomeView(updated) });
   } catch (err) {
     next(err);
@@ -219,4 +135,4 @@ const deleteNote = async (req, res, next) => {
   }
 };
 
-module.exports = { setOutcome, cancelBooking, listNotes, addNote, deleteNote, OUTCOMES };
+module.exports = { setOutcome, listNotes, addNote, deleteNote, OUTCOMES };

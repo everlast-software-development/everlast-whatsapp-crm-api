@@ -1,5 +1,6 @@
 // Inbox workflow check: campaign-reply attribution, template button taps,
-// reopening resolved chats, "replying claims", who is assignable, and the
+// reopening resolved chats, a patient message clearing the outcome (pending
+// follow-up or an old retired tag), "replying claims", who is assignable, and the
 // 24-hour window rule.
 //
 // Drives the REAL webhook handler (receiveWhatsAppMessage) with Meta-shaped
@@ -32,6 +33,7 @@ function check(name, ok, detail = "") {
 }
 
 let seq = 0;
+const settle = () => new Promise((resolve) => setTimeout(resolve, 300));
 // Feed one inbound message through the real webhook handler and wait for it.
 async function inbound(pnid, phone, msg) {
   const body = {
@@ -124,6 +126,53 @@ async function main() {
     await inbound(PNID_A, recipients.old.phone, { type: "text", text: { body: "one more question" } });
     const reopened = await prisma.conversation.findUnique({ where: { id: recipients.old.conv.id } });
     check("a message to a Resolved chat reopens it", reopened.status === "OPEN", `→ ${reopened.status}`);
+
+    // ── a patient writing again clears the outcome ──────────────────────────
+    // A pending follow-up on an OPEN chat: they came back on their own.
+    const fuConv = recipients.window.conv.id;
+    const fuAt = new Date(Date.now() + DAY);
+    await prisma.conversation.update({ where: { id: fuConv }, data: {
+      status: "OPEN", outcome: "FOLLOW_UP", outcomeAt: new Date(), outcomeById: author.id, followUpAt: fuAt, followUpNotifiedAt: new Date(),
+    } });
+    await inbound(PNID_A, recipients.window.phone, { type: "text", text: { body: "I'm back, can we talk?" } });
+    const fu = await prisma.conversation.findUnique({ where: { id: fuConv } });
+    check("a patient message cancels a pending follow-up on an open chat",
+      fu.status === "OPEN" && fu.outcome === null && fu.followUpAt === null && fu.outcomeAt === null && fu.outcomeById === null && fu.followUpNotifiedAt === null,
+      `→ ${fu.status} / ${fu.outcome} / ${fu.followUpAt}`);
+    await settle(); // audit entries are written fire-and-forget
+    const fuAudit = await prisma.auditLog.findFirst({ where: { targetType: "conversation", targetId: fuConv, action: "conversation.outcome_set" }, orderBy: { id: "desc" } });
+    check("…recorded in the chat's history (no actor, reason, previous follow-up)",
+      fuAudit && fuAudit.actorId === null && fuAudit.details?.outcome === null && fuAudit.details?.previousOutcome === "FOLLOW_UP"
+        && fuAudit.details?.reason === "customer wrote" && new Date(fuAudit.details?.previousFollowUpAt).getTime() === fuAt.getTime(),
+      JSON.stringify(fuAudit?.details));
+
+    // A retired outcome left over from before (still in the enum) is cleared too.
+    await prisma.conversation.update({ where: { id: fuConv }, data: { outcome: "NO_ANSWER", outcomeAt: new Date(), outcomeById: author.id } });
+    await inbound(PNID_A, recipients.window.phone, { type: "text", text: { body: "hello again" } });
+    const legacy = await prisma.conversation.findUnique({ where: { id: fuConv } });
+    check("a patient message clears an old No answer tag", legacy.outcome === null && legacy.outcomeAt === null && legacy.outcomeById === null, `→ ${legacy.outcome}`);
+
+    // A chat with no outcome: nothing to clear, nothing logged.
+    await settle();
+    const before = await prisma.auditLog.count({ where: { targetType: "conversation", targetId: fuConv, action: "conversation.outcome_set" } });
+    await inbound(PNID_A, recipients.window.phone, { type: "text", text: { body: "and one more thing" } });
+    await settle();
+    const after = await prisma.auditLog.count({ where: { targetType: "conversation", targetId: fuConv, action: "conversation.outcome_set" } });
+    check("no outcome: a patient message logs no outcome change", after === before, `${before} → ${after}`);
+
+    // STOP still opts them out of the line, and the follow-up goes too.
+    await prisma.conversation.update({ where: { id: fuConv }, data: { outcome: "FOLLOW_UP", outcomeAt: new Date(), outcomeById: author.id, followUpAt: fuAt } });
+    await inbound(PNID_A, recipients.window.phone, { type: "text", text: { body: "STOP" } });
+    const stopped = await prisma.conversation.findUnique({ where: { id: fuConv } });
+    const optOut = await prisma.customerOptOut.findFirst({ where: { customerId: recipients.window.customer.id, whatsappNumberId: numA.id } });
+    check("STOP: opted out of the line, and the pending follow-up is cleared",
+      optOut?.source === "KEYWORD" && stopped.outcome === null && stopped.followUpAt === null, `→ opt-out ${optOut?.source} / ${stopped.outcome}`);
+
+    // Reopening a Resolved chat with a follow-up clears it as before.
+    await prisma.conversation.update({ where: { id: recipients.old.conv.id }, data: { status: "RESOLVED", outcome: "FOLLOW_UP", outcomeAt: new Date(), outcomeById: author.id, followUpAt: fuAt } });
+    await inbound(PNID_A, recipients.old.phone, { type: "text", text: { body: "back again" } });
+    const reopened2 = await prisma.conversation.findUnique({ where: { id: recipients.old.conv.id } });
+    check("reopening a Resolved chat with a follow-up clears it", reopened2.status === "OPEN" && reopened2.outcome === null && reopened2.followUpAt === null, `→ ${reopened2.status} / ${reopened2.outcome}`);
 
     // ── who is assignable ───────────────────────────────────────────────────
     const agentA = await prisma.user.create({ data: { username: "ic_agent_a", passwordHash: "x", role: "AGENT" } });

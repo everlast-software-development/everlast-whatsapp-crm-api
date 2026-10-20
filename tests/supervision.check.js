@@ -1,8 +1,8 @@
 // Supervisor role + Supervision page check.
 //
 // "Who is waiting" bookkeeping (patient writes → waiting; agent replies →
-// not), the Supervision overview / chat lists / timeline, chat outcomes with
-// bookings, chat notes, and what the SUPERVISOR role may and may not do.
+// not), the Supervision overview / chat lists / timeline, chat outcomes, chat
+// notes, and what the SUPERVISOR role may and may not do.
 //
 // Drives the REAL webhook, the REAL send-message endpoint (Meta faked), and
 // the REAL outcome / notes / supervision handlers. Creates only its own
@@ -98,28 +98,31 @@ async function waitingBookkeeping() {
 }
 
 async function outcomes(conversationId) {
-  console.log(`\n${B}chat outcomes and bookings${RESET}`);
+  console.log(`\n${B}chat outcomes${RESET}`);
   const { agent } = ctx;
   const p = { params: { id: String(conversationId) } };
-  const noDate = await call(outcomeCtl.setOutcome, req(agent, { ...p, body: { outcome: "BOOKED", booking: {} } }));
-  check("Booked needs an appointment date", noDate.error?.statusCode === 400, noDate.error?.message || "");
-  const past = await call(outcomeCtl.setOutcome, req(agent, { ...p, body: { outcome: "BOOKED", booking: { appointmentAt: new Date(Date.now() - 3 * 24 * 3600 * 1000).toISOString() } } }));
-  check("a past appointment is refused", past.error?.statusCode === 400, past.error?.message || "");
   const bogus = await call(outcomeCtl.setOutcome, req(agent, { ...p, body: { outcome: "MAYBE" } }));
   check("an unknown outcome is refused", bogus.error?.statusCode === 400);
+  // Booking moved to a later phase: Booked can't be chosen any more.
+  const booked = await call(outcomeCtl.setOutcome, req(agent, { ...p, body: { outcome: "BOOKED", booking: { appointmentAt: new Date(Date.now() + 2 * 24 * 3600 * 1000).toISOString() } } }));
+  check("Booked is no longer an outcome", booked.error?.statusCode === 400 && (await conv(conversationId)).outcome === null, booked.error?.message || "");
 
-  const at = new Date(Date.now() + 2 * 24 * 3600 * 1000);
-  const ok = await call(outcomeCtl.setOutcome, req(agent, { ...p, body: { outcome: "BOOKED", booking: { appointmentAt: at.toISOString(), service: "Dental cleaning", note: "prefers Dr. Sara" } } }));
-  const c = await conv(conversationId);
-  const bookings = await prisma.booking.findMany({ where: { conversationId } });
-  check("Booked: the chat is marked, by whom and when", ok.code === 200 && c.outcome === "BOOKED" && c.outcomeById === agent.id && Boolean(c.outcomeAt), ok.error?.message || "");
-  check("…and the appointment is saved with its details", bookings.length === 1 && bookings[0].service === "Dental cleaning" && bookings[0].appointmentAt.getTime() === at.getTime() && bookings[0].createdById === agent.id);
+  // Not interested / No answer were dropped too: Follow up is the only one.
+  for (const [retired, label] of [["NOT_INTERESTED", "Not interested"], ["NO_ANSWER", "No answer"]]) {
+    const r = await call(outcomeCtl.setOutcome, req(agent, { ...p, body: { outcome: retired } }));
+    check(`${label} is no longer an outcome`, r.error?.statusCode === 400 && (await conv(conversationId)).outcome === null, r.error?.message || "");
+  }
 
-  const cancel = await call(outcomeCtl.cancelBooking, req(agent, { params: { id: String(conversationId), bookingId: String(bookings[0].id) } }));
-  const afterCancel = await conv(conversationId);
-  const cancelled = await prisma.booking.findUnique({ where: { id: bookings[0].id } });
-  check("cancelling keeps the booking as CANCELLED history", cancel.code === 200 && cancelled.status === "CANCELLED" && Boolean(cancelled.cancelledAt));
-  check("…and with no live booking left, the chat's outcome clears", afterCancel.outcome === null);
+  // A chat still carrying a retired outcome from before (the enum values stay
+  // in the database) can be set to Follow up, or cleared.
+  await prisma.conversation.update({ where: { id: conversationId }, data: { outcome: "BOOKED" } });
+  const fromLegacy = await call(outcomeCtl.setOutcome, req(agent, { ...p, body: { outcome: "FOLLOW_UP", followUpAt: new Date(Date.now() + 60 * MIN).toISOString() } }));
+  const fl = await conv(conversationId);
+  check("an older Booked chat can be set to Follow up, by whom and when", fromLegacy.code === 200 && fl.outcome === "FOLLOW_UP" && fl.outcomeById === agent.id && Boolean(fl.outcomeAt) && Boolean(fl.followUpAt), fromLegacy.error?.message || "");
+  await prisma.conversation.update({ where: { id: conversationId }, data: { outcome: "NO_ANSWER", followUpAt: null } });
+  const cleared = await call(outcomeCtl.setOutcome, req(agent, { ...p, body: { outcome: null } }));
+  const cl = await conv(conversationId);
+  check("…and an older No answer chat can be cleared", cleared.code === 200 && cl.outcome === null && cl.outcomeAt === null && cl.followUpAt === null, cleared.error?.message || "");
 
   const noWhen = await call(outcomeCtl.setOutcome, req(agent, { ...p, body: { outcome: "FOLLOW_UP" } }));
   check("Follow up needs a date", noWhen.error?.statusCode === 400);
@@ -149,7 +152,7 @@ async function notes(conversationId) {
   await call(outcomeCtl.addNote, req(supervisor, { ...p, body: { body: "Priority patient" } }));
 }
 
-async function supervisionViews(bookedConvId) {
+async function supervisionViews(convId) {
   console.log(`\n${B}the Supervision page${RESET}`);
   const { supervisor, agent } = ctx;
   const q = (query) => req(supervisor, { query: { numberId: String(ctx.number.id), ...query } });
@@ -160,17 +163,13 @@ async function supervisionViews(bookedConvId) {
   const short = await patientWrites(phone(), "hi");
   await prisma.conversation.update({ where: { id: short.id }, data: { awaitingReplySince: new Date(Date.now() - 5 * MIN) } });
 
-  // A flow run that collected a booking request; one that stopped halfway.
-  const flow = await prisma.flow.create({ data: { name: "SV booking flow", graph: { nodes: [], edges: [] }, createdById: supervisor.id } });
+  // A flow run that finished; one that stopped halfway.
+  const flow = await prisma.flow.create({ data: { name: "SV flow", graph: { nodes: [], edges: [] }, createdById: supervisor.id } });
   made.flows.push(flow.id);
-  const reqConv = await patientWrites(phone(), "I'd like to book");
+  const doneConv = await patientWrites(phone(), "Tell me more");
   const dropConv = await patientWrites(phone(), "offers?");
-  if (flow) {
-    const bookingRun = await prisma.flowRun.create({ data: { flowId: flow.id, conversationId: reqConv.id, customerId: reqConv.customerId, status: "COMPLETED", data: { answers: { preferred_date: "2026-10-20", contact_number: "0501234567" } } } });
-    // What the flow does when it finishes: the answers become a booking request.
-    await require("../utils/bookingRequests").createFromFlowRun(bookingRun.id);
-    await prisma.flowRun.create({ data: { flowId: flow.id, conversationId: dropConv.id, customerId: dropConv.customerId, status: "EXPIRED", data: { answers: {} } } });
-  }
+  await prisma.flowRun.create({ data: { flowId: flow.id, conversationId: doneConv.id, customerId: doneConv.customerId, status: "COMPLETED", data: { answers: { preferred_date: "2026-10-20" } } } });
+  await prisma.flowRun.create({ data: { flowId: flow.id, conversationId: dropConv.id, customerId: dropConv.customerId, status: "EXPIRED", data: { answers: {} } } });
 
   const ov = await call(sup.getOverview, q({}));
   const k = ov.body?.data?.kpis || {};
@@ -197,9 +196,8 @@ async function supervisionViews(bookedConvId) {
   check("…and picks up a message that just arrived", fresh.body.data.some((i) => i.type === "patient_message" && i.text === "just now"));
   check("agent board: open chats, waiting over 30 min, replies today", me && me.openChats >= 1 && me.waitingOverSla >= 1 && me.repliesToday >= 1, JSON.stringify(me));
   check("agent board: average response time measured", me && me.avgResponseMinutes !== null, `avg ${me && me.avgResponseMinutes}m`);
-  if (flow) {
-    check("overview counts open booking requests and halfway drop-offs", k.bookingRequestsOpen >= 1 && k.droppedHalfwayToday >= 1, `requests ${k.bookingRequestsOpen}, dropped ${k.droppedHalfwayToday}`);
-  }
+  check("overview counts halfway drop-offs", k.droppedHalfwayToday >= 1, `dropped ${k.droppedHalfwayToday}`);
+  check("overview has no booking figures any more", !Object.keys(k).some((key) => /book/i.test(key)) && ov.body.data.agents.every((a) => !("bookedToday" in a)), Object.keys(k).join(", "));
 
   const waiting = await call(sup.getConversations, q({ filter: "waiting" }));
   const rows = waiting.body?.data || [];
@@ -212,12 +210,9 @@ async function supervisionViews(bookedConvId) {
   const unassigned = await call(sup.getConversations, q({ filter: "waiting", agentId: "unassigned" }));
   check("filter unassigned", unassigned.body.data.every((r) => !r.assignedAgent) && unassigned.body.data.some((r) => r.id === short.id));
 
-  if (flow) {
-    const booking = await call(sup.getConversations, q({ filter: "booking" }));
-    check("'booking requests' shows the chat whose flow collected a date", booking.body.data.some((r) => r.id === reqConv.id && r.flow?.bookingRequested));
-    const halfway = await call(sup.getConversations, q({ filter: "halfway" }));
-    check("'dropped halfway' shows the expired flow", halfway.body.data.some((r) => r.id === dropConv.id && r.flow?.droppedHalfway));
-  }
+  const halfway = await call(sup.getConversations, q({ filter: "halfway" }));
+  check("'dropped halfway' shows the expired flow", halfway.body.data.some((r) => r.id === dropConv.id && r.flow?.droppedHalfway));
+  check("…but not the one that finished", !halfway.body.data.some((r) => r.id === doneConv.id));
   // A patient who wrote two days ago and was never answered has "gone cold".
   const cold = await patientWrites(phone(), "hello? (2 days ago)");
   await prisma.conversation.update({ where: { id: cold.id }, data: { awaitingReplySince: new Date(Date.now() - 48 * 60 * MIN), lastMessageAt: new Date(Date.now() - 48 * 60 * MIN) } });
@@ -241,17 +236,14 @@ async function supervisionViews(bookedConvId) {
   check("…and the detail pane lists their chat on the other line", tl2.body.data.otherChats.some((o) => o.id === twin.id));
 
   const fu = await call(sup.getConversations, q({ filter: "follow_up" }));
-  const fuRow = fu.body.data.find((r) => r.id === bookedConvId);
+  const fuRow = fu.body.data.find((r) => r.id === convId);
   check("'follow-ups' shows the chat, flagged overdue", fuRow && fuRow.followUpOverdue === true);
 
-  const tl = await call(sup.getConversationTimeline, req(supervisor, { params: { id: String(bookedConvId) } }));
+  const tl = await call(sup.getConversationTimeline, req(supervisor, { params: { id: String(convId) } }));
   const t = tl.body?.data;
   check("timeline: latest messages with who sent them", t && t.messages.length >= 4 && t.messages.some((m) => m.senderType === "AGENT" && m.sender?.id === agent.id));
   check("timeline: each wait and how long the reply took", t && t.waits.some((w) => w.repliedBy && w.minutes >= 0) && t.waits.some((w) => w.stillWaiting === false));
-  check("timeline: bookings (incl. cancelled), notes and history", t && t.bookings.length >= 1 && t.notes.length >= 1 && t.history.some((h) => h.action === "conversation.outcome_set"));
-
-  const b = await call(sup.getBookings, q({ status: "all" }));
-  check("bookings list includes the patient's appointment", b.body?.data?.some((x) => x.conversationId === bookedConvId));
+  check("timeline: notes and history", t && t.notes.length >= 1 && t.history.some((h) => h.action === "conversation.outcome_set"));
 }
 
 // ── run ─────────────────────────────────────────────────────────────────────
@@ -286,8 +278,6 @@ async function main() {
     const convIds = convs.map((c) => c.id);
     await prisma.flowRun.deleteMany({ where: { conversationId: { in: convIds } } });
     await prisma.flow.deleteMany({ where: { id: { in: made.flows } } });
-    await prisma.booking.deleteMany({ where: { conversationId: { in: convIds } } });
-    await prisma.bookingRequest.deleteMany({ where: { conversationId: { in: convIds } } });
     await prisma.conversationNote.deleteMany({ where: { conversationId: { in: convIds } } });
     await prisma.message.deleteMany({ where: { conversationId: { in: convIds } } });
     await prisma.auditLog.deleteMany({ where: { OR: [{ targetType: "conversation", targetId: { in: convIds } }, { actorId: { in: made.users } }] } });
