@@ -134,10 +134,7 @@ const DEFAULT_RETRY = {
 // (FLOW_TYPING_PAUSE_MS overrides it, e.g. 0 in tests.)
 const TYPING_PAUSE_MS = Number(process.env.FLOW_TYPING_PAUSE_MS ?? 1200);
 
-// `ai`: written by the AI assistant (utils/aiAssistant.js) — the live bubble
-// carries aiGenerated so the inbox shows its "AI" badge straight away (the
-// saved link is the AiReply row; see getConversationMessages).
-async function sendBot(ctx, { kind, text, mediaType, mediaUrl, footer, header, buttons, list, prebuilt, carousel, ai = false }) {
+async function sendBot(ctx, { kind, text, mediaType, mediaUrl, footer, header, buttons, list, prebuilt, carousel }) {
   const { conversation, customer, numberId } = ctx;
   const credentials = await numbers.getCredentials(numberId);
 
@@ -233,7 +230,7 @@ async function sendBot(ctx, { kind, text, mediaType, mediaUrl, footer, header, b
     // starts that clock again).
     data: { lastMessage: preview, lastMessageAt: new Date(), lastSenderType: "BOT", awaitingReplySince: null },
   });
-  emitToNumber(numberId, "message.created", { message: ai ? { ...message, aiGenerated: true } : message, conversationId: conversation.id });
+  emitToNumber(numberId, "message.created", { message, conversationId: conversation.id });
   emitToNumber(numberId, "conversation.updated", { conversationId: conversation.id });
 
   if (sendError) {
@@ -248,9 +245,8 @@ async function sendBot(ctx, { kind, text, mediaType, mediaUrl, footer, header, b
  * Hand a chat to the team: open it (assigned to `agent` when given), alert
  * every agent who can reply on the line ("flow.handoff", shown by the
  * frontend's HandoffNotifier) and start the patient's "waiting for a person"
- * clock. `alert` is merged into the event: who handed over and why (a flow's
- * name and the patient's interest; the AI assistant's reason and summary).
- * Used by the flow Assign step and by the AI assistant.
+ * clock. `alert` is merged into the event: who handed over and why (the
+ * flow's name and the patient's interest). Used by the flow Assign step.
  */
 async function handToTeam(ctx, { agent = null, alert = {} } = {}) {
   await prisma.conversation.update({
@@ -602,8 +598,7 @@ async function resumeFromTap(ctx, tapped, active) {
  * @param optIntent      "OUT" | "IN" | null
  * @returns a promise of { consumed }: true when a flow took the message (a tap
  *   on a flow's button, a campaign answer that started a flow, STOP, or any
- *   message while a run is in progress) — the AI assistant then stays out.
- *   Never rejects.
+ *   message while a run is in progress). Never rejects.
  */
 function handleInbound({ numberId, customer, conversation, inbound, campaignReply, optIntent }) {
   let consumed = false;
@@ -627,7 +622,7 @@ function handleInbound({ numberId, customer, conversation, inbound, campaignRepl
     // 1. A tap on one of OUR buttons — on ANY message the flow sent, not only
     // the latest: people scroll up and tap an old menu or card. See resumeFromTap.
     // Anything said while a run is in progress belongs to the flow (an answer,
-    // or for the agents), never to the AI assistant.
+    // or for the agents).
     if (active) consumed = true;
     const tapped = parseReplyId(inbound.replyId);
     if (tapped) {
@@ -726,7 +721,4 @@ async function matchCampaignStart(campaignId, inbound) {
 
 module.exports = {
   handleInbound, handOffOnAgentReply, expireStaleRuns, parseAnswer, interpolate,
-  // For the AI assistant (utils/aiAssistant.js): the same send, hand-off and
-  // per-conversation ordering as flows.
-  sendBot, handToTeam, serialize,
 };

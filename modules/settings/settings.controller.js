@@ -8,9 +8,6 @@ const { getQuietHoursConfig } = require("../../utils/quietHours");
 const { emitGlobal } = require("../../utils/socket");
 const logAudit = require("../../utils/audit");
 const { checkNumberQuality } = require("../../jobs/numberQualityWatch");
-const workersAi = require("../../utils/workersAi");
-const { knowledgeCounts, reindexStatus } = require("../../utils/knowledge");
-const { aiProviderView, saveAiProvider } = require("./aiProvider.controller");
 
 // ─── GET /api/settings ──────────────────────────────────────────────────────
 // What is in force right now. Quiet hours report where they come from: the
@@ -18,25 +15,12 @@ const { aiProviderView, saveAiProvider } = require("./aiProvider.controller");
 const getSettings = async (req, res, next) => {
   try {
     const qh = getQuietHoursConfig();
-    const cfg = workersAi.getConfig();
     res.status(200).json({
       success: true,
       data: {
         quietHours: { enabled: qh.enabled, start: qh.start, end: qh.end, timezone: qh.timezone, source: qh.source },
         campaignSafety: getSetting("campaignSafety"),
         testPhones: getSetting("testPhones"),
-        aiAssistant: getSetting("aiAssistant"),
-        // Never the token: the view says only whether one exists.
-        aiProvider: aiProviderView(),
-        // Whether the assistant could work at all: the provider, and what it
-        // has to answer from.
-        aiStatus: {
-          configured: cfg.configured,
-          chatModel: cfg.chatModel,
-          embedModel: cfg.embedModel,
-          ...(await knowledgeCounts()),
-          reindex: reindexStatus(),
-        },
       },
     });
   } catch (err) {
@@ -49,8 +33,6 @@ const updateSetting = async (req, res, next) => {
   try {
     const { key } = req.params;
     if (!SETTING_KEYS.includes(key)) return next(new AppError(`Unknown setting "${key}"`, 404));
-    // Holds a secret: its own save, response and audit (aiProvider.controller.js).
-    if (key === "aiProvider") return saveAiProvider(req, res, next);
     const before = key === "quietHours" ? getQuietHoursConfig() : getSetting(key);
     const saved = await saveSetting(key, req.body, req.user);
     logAudit({

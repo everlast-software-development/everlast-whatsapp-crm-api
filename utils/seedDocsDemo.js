@@ -10,10 +10,12 @@
 //   · patients           phone starting DEMO_PHONE_PREFIX
 //   · staff              username starting "docs_"
 //   · templates          wabaId DEMO_WABA
-//   · lists / segments / knowledge articles   name starting "[Demo]"
+//   · lists / segments   name starting "[Demo]"
 // Chats, messages, flow runs and campaigns go with the line. No booking data
 // is created (booking moved to a later phase), but removal still clears any
-// booking rows an older copy of the demo left on the line.
+// booking rows an older copy of the demo left on the line. Knowledge articles
+// are the same (the AI assistant moved to a later phase too): none are
+// created, and removal clears "[Demo]" ones an older copy made.
 //
 // Re-running replaces the demo data with a fresh copy (timestamps are relative
 // to now, so "waiting 12m" and "follow up tomorrow" stay meaningful).
@@ -411,34 +413,6 @@ async function create() {
       createdById: staff.marketing.id,
     },
   });
-
-  // ── knowledge base ──
-  const article = (title, category, status, sections) =>
-    prisma.knowledgeArticle.create({
-      data: {
-        title: `${DEMO_TAG} ${title}`, category, status, sections, createdById: staff.admin.id, updatedById: staff.admin.id,
-        ...(status === "APPROVED" ? { approvedById: staff.admin.id, approvedAt: daysAgo(6) } : {}),
-      },
-    });
-  await article("HydraFacial", "Aesthetics", "APPROVED", {
-    summary: "A 45-minute facial that cleanses, exfoliates, extracts and hydrates. Suitable for most skin types.",
-    before: "Avoid retinol and exfoliating products for 48 hours before. Come with clean skin if possible.",
-    after: "Avoid make-up for 6 hours and direct sun for 24 hours. Use SPF 50.",
-    downtime: "None — most patients go straight back to work.",
-    notSuitableFor: "Active rosacea flare-ups, sunburn, or open wounds on the face.",
-    faq: "How often? Every 4 weeks for best results.",
-  });
-  await article("Laser hair removal", "Laser", "APPROVED", {
-    summary: "Long-lasting hair reduction using a diode laser with built-in cooling. A course is usually 6–8 sessions.",
-    before: "Shave the area 24 hours before. No waxing or plucking for 4 weeks. Avoid tanning for 2 weeks.",
-    after: "Mild redness for a few hours is normal. Avoid hot showers, saunas and the gym for 24 hours.",
-    notSuitableFor: "Pregnancy, recent tanning, or photosensitising medication.",
-  });
-  await article("Dry needling", "Physiotherapy", "APPROVED", {
-    summary: "A physiotherapy technique that releases tight muscle knots with fine needles.",
-    after: "Drink plenty of water, keep moving gently and avoid intense exercise for 24 hours. Mild soreness for 1–2 days is normal.",
-  });
-  await article("Botox", "Aesthetics", "DRAFT", { summary: "Draft — waiting for the medical team's review." });
 
   return { staff, number };
 }

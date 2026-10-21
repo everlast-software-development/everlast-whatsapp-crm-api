@@ -76,11 +76,6 @@ const ALL_PERMISSIONS = [
   // Development tools (the message/cost tracker). ADMIN only, via "*"; the
   // /api/dev routes also don't exist in production at all.
   "dev:tools",
-  // The AI assistant's knowledge base. Everyone may read it (and try the
-  // assistant on it); only ADMIN, via "*", writes and approves what it may say
-  // to patients.
-  "knowledge:read",
-  "knowledge:write",
 ];
 
 // ADMIN is the wildcard "*" rather than an enumerated list on purpose: in this
@@ -114,7 +109,6 @@ const ROLE_PERMISSIONS = {
     "user:read", // agent names for reporting filters; user:write stays ADMIN
     // No audit:read — the audit log is ADMIN only.
     "stats:read", "number:read", "number:use_any",
-    "knowledge:read",
   ],
 
   // An agent who also manages the agents. Everything an agent does, plus the
@@ -132,7 +126,6 @@ const ROLE_PERMISSIONS = {
     "team:supervise",
     "campaign:read",
     "stats:read",
-    "knowledge:read",
   ],
 
   AGENT: [
@@ -160,8 +153,6 @@ const ROLE_PERMISSIONS = {
     // to; without these, inbound conversations on a number they aren't "on"
     // would be unanswerable.
     "number:read", "number:use_any",
-    // What the AI assistant knows — to see what it will tell a patient.
-    "knowledge:read",
   ],
 };
 
