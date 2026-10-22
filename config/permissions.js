@@ -57,6 +57,14 @@ const ALL_PERMISSIONS = [
   "user:write",
   // Reporting / ops
   "stats:read",
+  // How each person on the team is doing (GET /api/stats/agents, the agent
+  // presence counts in /overview, who a stalled chat sits with). Separate from
+  // stats:read because MARKETING reads stats but must not see staff
+  // performance. ADMIN and SUPERVISOR.
+  "stats:team",
+  // The Marketing dashboard (GET /api/stats/marketing): campaign funnel,
+  // flows, audience, line health. ADMIN and MARKETING.
+  "stats:marketing",
   "audit:read",
   // WhatsApp numbers. `number:read` lists them (every role needs it to render
   // the switcher). `number:use_any` is permission to act as any active number —
@@ -107,8 +115,9 @@ const ROLE_PERMISSIONS = {
     "campaign:read", "campaign:write", "campaign:control",
     "media:read", "media:write",
     "user:read", // agent names for reporting filters; user:write stays ADMIN
-    // No audit:read — the audit log is ADMIN only.
-    "stats:read", "number:read", "number:use_any",
+    // No audit:read — the audit log is ADMIN only. No stats:team — marketing
+    // sees campaign and audience results, never how individual staff perform.
+    "stats:read", "stats:marketing", "number:read", "number:use_any",
   ],
 
   // An agent who also manages the agents. Everything an agent does, plus the
@@ -125,7 +134,7 @@ const ROLE_PERMISSIONS = {
     "number:read", "number:use_any",
     "team:supervise",
     "campaign:read",
-    "stats:read",
+    "stats:read", "stats:team",
   ],
 
   AGENT: [

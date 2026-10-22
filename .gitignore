@@ -2,3 +2,6 @@ node_modules/
 config.env
 *.env
 .env
+
+# Railway variables (filled in with real values)
+railway.env

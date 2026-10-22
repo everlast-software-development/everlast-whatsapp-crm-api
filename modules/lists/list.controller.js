@@ -85,6 +85,18 @@ async function buildListImportPlan(rows, dateFormat = "auto", defaultCountry = "
   return { total: rows.length, invalid, existingRows, toCreate };
 }
 
+// Two lists with the same name are indistinguishable in the campaign wizard and
+// on the Marketing dashboard's audience table. Case and surrounding spaces
+// don't count. Lists that were already duplicated before this check stay.
+async function nameTaken(name, exceptId = null) {
+  const clash = await prisma.contactList.findFirst({
+    where: { name: { equals: name.trim(), mode: "insensitive" }, ...(exceptId ? { id: { not: exceptId } } : {}) },
+    select: { id: true },
+  });
+  return !!clash;
+}
+const NAME_TAKEN = "A list with this name already exists";
+
 const getAllLists = async (req, res, next) => {
   try {
     const lists = await prisma.contactList.findMany({
@@ -111,6 +123,7 @@ const createList = async (req, res, next) => {
   try {
     const { name, description } = req.body;
     if (!name?.trim()) return next(new AppError("List name is required", 400));
+    if (await nameTaken(name)) return next(new AppError(NAME_TAKEN, 409));
     const list = await prisma.contactList.create({
       data: { name: name.trim(), description: description?.trim() || null, createdById: req.user.id },
     });
@@ -181,7 +194,13 @@ const updateList = async (req, res, next) => {
     const { name, description } = req.body;
     const data = {};
     if (name !== undefined) {
-      if (!name.trim()) return next(new AppError("List name is required", 400));
+      if (!name?.trim()) return next(new AppError("List name is required", 400));
+      // Only a real rename is checked, so an old duplicate can still have its
+      // description edited (the edit form sends the name back unchanged).
+      const current = await prisma.contactList.findUnique({ where: { id }, select: { name: true } });
+      if (!current) return next(new AppError("List not found", 404));
+      const renamed = current.name.trim().toLowerCase() !== name.trim().toLowerCase();
+      if (renamed && (await nameTaken(name, id))) return next(new AppError(NAME_TAKEN, 409));
       data.name = name.trim();
     }
     if (description !== undefined) data.description = description?.trim() || null;

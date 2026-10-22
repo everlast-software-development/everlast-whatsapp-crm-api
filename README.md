@@ -237,8 +237,9 @@ Admin dashboard data. All endpoints are admin-only.
 - `GET /api/stats/overview` — KPI counts: messages today, conversations by status, online agents, unread total
 - `GET /api/stats/messages?days=7` — message volume chart, type breakdown, delivery rates, peak hour
 - `GET /api/stats/conversations` — pipeline status, avg resolution time, potential leads list, stalled conversations list
-- `GET /api/stats/agents` — per-agent productivity: messages sent, response time, assigned conversations
+- `GET /api/stats/agents` — per-agent productivity: messages sent, response time, assigned conversations (`stats:team`: admins, supervisors)
 - `GET /api/stats/customers?days=30` — customer growth chart, returning customers, tag distribution, email capture rate
+- `GET /api/stats/marketing?from=YYYY-MM-DD&to=YYYY-MM-DD&numberId=` — the Marketing dashboard: campaign funnel and per-campaign results, flows, audience, line health, what needs attention (`stats:marketing`: admins, marketing). Definitions in `modules/stats/marketing.controller.js`
 
 ---
 

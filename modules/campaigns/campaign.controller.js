@@ -1126,7 +1126,52 @@ const getCampaign = async (req, res, next) => {
 // an approver signs off on the same count that gets messaged, even if someone
 // edits the segment an hour later. Consent exclusion is forced on regardless of
 // the segment's own setting: this is a send path.
-async function resolveAudience({ segmentId, recipientIds, whatsappNumberId = null }) {
+//
+// A hand-picked audience may say which contact lists it came from
+// (audienceLists, the wizard's ticked lists). That is provenance only — the
+// recipients are still exactly recipientIds — and it is what the Marketing
+// dashboard's "Audience performance" groups campaigns by. Each list records
+// how many of THIS campaign's recipients are in it; extraContacts are the
+// recipients in none of them (picked one by one). A list none of the
+// recipients belong to is left out, so the label never names a list that
+// didn't contribute.
+const MAX_AUDIENCE_LISTS = 50;
+
+function readAudienceLists(raw) {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) throw new AppError("audienceLists must be an array of list ids", 400);
+  if (raw.length > MAX_AUDIENCE_LISTS) throw new AppError(`At most ${MAX_AUDIENCE_LISTS} lists can be named as the audience`, 400);
+  const ids = raw.map((n) => (typeof n === "string" && /^\d+$/.test(n.trim()) ? parseInt(n) : n));
+  if (!ids.every((n) => Number.isInteger(n) && n > 0)) throw new AppError("audienceLists must be an array of list ids", 400);
+  return [...new Set(ids)];
+}
+
+async function describeLists(listIds, recipientIds) {
+  if (listIds.length === 0) return { lists: [], extraContacts: recipientIds.length };
+  const found = await prisma.contactList.findMany({ where: { id: { in: listIds } }, select: { id: true, name: true } });
+  if (found.length !== listIds.length) throw new AppError("List not found", 404);
+  if (recipientIds.length === 0) return { lists: [], extraContacts: 0 };
+
+  const [perList, covered] = await Promise.all([
+    prisma.$queryRaw`
+      SELECT m."listId" AS id, COUNT(*)::int AS members
+      FROM "ListMember" m
+      WHERE m."listId" = ANY(${listIds}::int[]) AND m."customerId" = ANY(${recipientIds}::int[])
+      GROUP BY m."listId"`,
+    prisma.$queryRaw`
+      SELECT COUNT(DISTINCT m."customerId")::int AS n
+      FROM "ListMember" m
+      WHERE m."listId" = ANY(${listIds}::int[]) AND m."customerId" = ANY(${recipientIds}::int[])`,
+  ]);
+  const members = new Map(perList.map((r) => [r.id, Number(r.members)]));
+  const lists = listIds
+    .map((id) => found.find((l) => l.id === id))
+    .map((l) => ({ id: l.id, name: l.name, members: members.get(l.id) || 0 }))
+    .filter((l) => l.members > 0);
+  return { lists, extraContacts: Math.max(0, recipientIds.length - Number(covered[0]?.n || 0)) };
+}
+
+async function resolveAudience({ segmentId, recipientIds, audienceLists, whatsappNumberId = null }) {
   if (segmentId) {
     const segment = await prisma.segment.findUnique({ where: { id: parseInt(segmentId) } });
     if (!segment) throw new AppError("Segment not found", 404);
@@ -1149,14 +1194,18 @@ async function resolveAudience({ segmentId, recipientIds, whatsappNumberId = nul
     };
   }
 
+  const listIds = readAudienceLists(audienceLists);
   const ids = [
     ...new Set((Array.isArray(recipientIds) ? recipientIds : []).map((n) => parseInt(n)).filter(Number.isInteger)),
   ];
+  const { lists, extraContacts } = await describeLists(listIds, ids);
   return {
     ids,
     segmentId: null,
     snapshot: {
-      source: "MANUAL",
+      source: lists.length ? "LIST" : "MANUAL",
+      lists,
+      extraContacts,
       resolvedAt: new Date().toISOString(),
       resolvedCount: ids.length,
     },
@@ -1176,7 +1225,7 @@ async function resolveFlowId(raw) {
 
 const createCampaign = async (req, res, next) => {
   try {
-    const { name, templateId, recipientIds, segmentId, scheduledAt, category } = req.body;
+    const { name, templateId, recipientIds, segmentId, audienceLists, scheduledAt, category } = req.body;
     if (!name) return next(new AppError("name is required", 400));
     const flowId = await resolveFlowId(req.body.flowId);
     if (!templateId) return next(new AppError("templateId is required", 400));
@@ -1196,7 +1245,7 @@ const createCampaign = async (req, res, next) => {
     // from, and that id is persisted below. If the two disagreed, the frozen
     // audience snapshot would describe a different population than the one
     // actually messaged.
-    const audience = await resolveAudience({ segmentId, recipientIds, whatsappNumberId: req.numberId });
+    const audience = await resolveAudience({ segmentId, recipientIds, audienceLists, whatsappNumberId: req.numberId });
     const ids = audience.ids;
 
     // Only enforce recipients when actually sending/scheduling
@@ -1255,6 +1304,7 @@ const createCampaign = async (req, res, next) => {
         audienceSource: audience.snapshot.source,
         segmentId: audience.segmentId,
         segmentName: audience.snapshot.segmentName || null,
+        ...(audience.snapshot.lists?.length ? { lists: audience.snapshot.lists.map((l) => l.name) } : {}),
         scheduledAt: scheduledAt || null,
       },
     });
@@ -1337,7 +1387,7 @@ const updateCampaign = async (req, res, next) => {
     const editErr = assertAgentMayEdit(existing, req.user);
     if (editErr) return next(editErr);
 
-    const { name, templateId, recipientIds, segmentId, scheduledAt, category } = req.body;
+    const { name, templateId, recipientIds, segmentId, audienceLists, scheduledAt, category } = req.body;
     const flowId = await resolveFlowId(req.body.flowId);
     const categoryErr = invalidCategory(category);
     if (categoryErr) return next(categoryErr);
@@ -1369,7 +1419,7 @@ const updateCampaign = async (req, res, next) => {
     const rebuild = segmentId !== undefined || (recipientIds && Array.isArray(recipientIds));
     if (rebuild) {
       // Same line as the campaign, like create and refresh.
-      const audience = await resolveAudience({ segmentId, recipientIds, whatsappNumberId: existing.whatsappNumberId });
+      const audience = await resolveAudience({ segmentId, recipientIds, audienceLists, whatsappNumberId: existing.whatsappNumberId });
       data.totalRecipients = audience.ids.length;
       data.segmentId = audience.segmentId;
       data.audienceSnapshot = audience.snapshot;

@@ -10,6 +10,7 @@
 // Meta counts unique people.
 
 const axios = require("axios");
+const { Prisma } = require("@prisma/client");
 const prisma = require("../config/prisma");
 const numbers = require("./whatsappNumbers");
 const { getApiVersion } = require("./whatsappClient");
@@ -45,6 +46,26 @@ async function getTier(number) {
     console.warn(`[Capacity] could not read messaging tier for "${number.label}":`, err.response?.data?.error?.message || err.message);
     return null;
   }
+}
+
+// People each of these numbers sent a template to in the last 24 hours —
+// the "used" half of the limit, for several lines in one query (the Marketing
+// dashboard's line health). Same counting rule as getCampaignCapacity below.
+// Returns Map(numberId -> used); a number with no sends is absent.
+async function usedLast24hByNumber(numberIds) {
+  if (!numberIds.length) return new Map();
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const rows = await prisma.$queryRaw`
+    SELECT c."whatsappNumberId" AS "numberId", COUNT(DISTINCT c."customerId")::int AS used
+    FROM "Message" m
+    JOIN "Conversation" c ON c.id = m."conversationId"
+    WHERE c."whatsappNumberId" IN (${Prisma.join(numberIds)})
+      AND m."senderType" = 'AGENT'
+      AND m."messageType" = 'TEMPLATE'
+      AND m."createdAt" >= ${since}
+      AND (m.status IS NULL OR m.status <> 'FAILED')
+    GROUP BY c."whatsappNumberId"`;
+  return new Map(rows.map((r) => [r.numberId, r.used]));
 }
 
 // Capacity for sending `campaignId`'s remaining (PENDING) recipients now.
@@ -100,4 +121,4 @@ async function getCampaignCapacity(campaignId) {
   };
 }
 
-module.exports = { getCampaignCapacity, getTier, TIER_LIMITS, _tierCache: tierCache };
+module.exports = { getCampaignCapacity, getTier, usedLast24hByNumber, TIER_LIMITS, _tierCache: tierCache };

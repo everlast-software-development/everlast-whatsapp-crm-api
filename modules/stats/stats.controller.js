@@ -21,6 +21,8 @@ const getOverview = async (req, res, next) => {
     // Midnight in the clinic's time zone, not the server's (UTC on Railway).
     const todayStart = startOfLocalDay();
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    // Staff presence is team data: supervisors and admins only (stats:team).
+    const team = roleHasPermission(req.user.role, "stats:team");
 
     const [
       messagesToday,
@@ -46,7 +48,7 @@ const getOverview = async (req, res, next) => {
       // switcher.
       prisma.customer.count(),
       prisma.customer.count({ where: { createdAt: { gte: sevenDaysAgo } } }),
-      prisma.user.groupBy({ by: ["status"], where: { role: "AGENT" }, _count: { id: true } }),
+      team ? prisma.user.groupBy({ by: ["status"], where: { role: "AGENT" }, _count: { id: true } }) : [],
       prisma.conversation.aggregate({ where: conversationWhere(req), _sum: { unreadCount: true } }),
       // Chats with anything unread — what the Inbox badge shows, like WhatsApp
       // (one chat with five new messages is one, not five).
@@ -74,7 +76,8 @@ const getOverview = async (req, res, next) => {
           total: conv.OPEN + conv.PENDING + conv.RESOLVED,
         },
         customers: { total: totalCustomers, newLast7Days: newCustomers },
-        agents: { online: agent.ONLINE, onBreak: agent.ON_BREAK, offline: agent.OFFLINE },
+        // null without stats:team (marketing never sees staff figures).
+        agents: team ? { online: agent.ONLINE, onBreak: agent.ON_BREAK, offline: agent.OFFLINE } : null,
         unreadMessages: unreadAgg._sum.unreadCount || 0,
         unreadConversations: unreadChats,
       },
@@ -165,6 +168,7 @@ const getConversationStats = async (req, res, next) => {
     const sixHoursAgo    = new Date(Date.now() - 6  * 60 * 60 * 1000);
     const now            = Date.now();
     const inbox          = roleHasPermission(req.user.role, "conversation:read");
+    const team           = roleHasPermission(req.user.role, "stats:team");
 
     const [pipeline, avgResRaw, newLast7Raw, leads, stalled] = await Promise.all([
       prisma.conversation.groupBy({ by: ["status"], where: conversationWhere(req), _count: { id: true } }),
@@ -250,7 +254,8 @@ const getConversationStats = async (req, res, next) => {
           customerId: c.customerId,
           customerName: c.customer.name,
           customerPhone: c.customer.phone,
-          assignedAgent: c.assignedAgent?.username || null,
+          // Who a stalled chat sits with is staff performance (stats:team).
+          assignedAgent: team ? c.assignedAgent?.username || null : null,
           lastMessageAt: c.lastMessageAt,
           waitingHours: c.lastMessageAt
             ? parseFloat(((now - new Date(c.lastMessageAt).getTime()) / 3600000).toFixed(1))

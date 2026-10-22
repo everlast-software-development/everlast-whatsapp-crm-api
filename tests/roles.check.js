@@ -136,6 +136,10 @@ const ENDPOINTS = [
   ["POST", "/api/media/upload", "media:upload"],
   // reporting
   ["GET", "/api/stats/overview", "stats:read"],
+  // Staff performance: supervisors and admins, never marketing.
+  ["GET", "/api/stats/agents", "stats:team"],
+  // The Marketing dashboard. Without from/to it stops at 400 past the guard.
+  ["GET", "/api/stats/marketing", "stats:marketing"],
   // team
   ["GET", "/api/users", "user:read"],
   // The agent picker's list — open to anyone who can assign, which includes
