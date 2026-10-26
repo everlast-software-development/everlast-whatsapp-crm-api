@@ -12,21 +12,13 @@ const prisma = require("../config/prisma");
 const numbers = require("./whatsappNumbers");
 const { emitGlobal, emitToNumber } = require("./socket");
 const logAudit = require("./audit");
-
-const getApiVersion = () => process.env.WHATSAPP_API_VERSION || "v19.0";
-
 // Meta's template events / statuses → ours. Meta can pause an approved
 // template (quality), disable it, reinstate it, or delete it; every one of
-// those decides whether campaigns can send it.
-const META_STATUS = {
-  APPROVED: "APPROVED",
-  REINSTATED: "APPROVED",
-  REJECTED: "REJECTED",
-  PAUSED: "PAUSED",
-  DISABLED: "DISABLED",
-  PENDING_DELETION: "DISABLED",
-  DELETED: "DISABLED",
-};
+// those decides whether campaigns can send it. Lives with the import mapping
+// (pure, no DB) so an imported template and a synced one agree.
+const { META_STATUS } = require("./templateImport");
+
+const getApiVersion = () => process.env.WHATSAPP_API_VERSION || "v19.0";
 const AUDIT_ACTION = {
   APPROVED: "TEMPLATE_APPROVED",
   REJECTED: "TEMPLATE_REJECTED",

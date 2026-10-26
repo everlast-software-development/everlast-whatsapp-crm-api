@@ -7,178 +7,32 @@ const numbers = require("../../utils/whatsappNumbers");
 const { emitToNumber } = require("../../utils/socket");
 const logAudit = require("../../utils/audit");
 const { claimIfUnassigned } = require("../../utils/conversationAssignment");
+const { roleHasPermission } = require("../../config/permissions");
 const { handOffOnAgentReply } = require("../../utils/flowEngine");
 const { readClientMessageId, findDuplicateSend, isClientIdRace, assertMayReply } = require("../../utils/replyGuards");
 const { buildTemplateSend } = require("../../utils/templateSend");
 const { windowState, windowClosedError } = require("../../utils/messagingWindow");
 const { describeMetaTemplateError } = require("../../utils/metaErrors");
-const { syncSubmittedTemplates } = require("../../utils/templateStatus");
-const { toMetaPositionalBody, buildTemplateParams, listPlaceholders, SUPPORTED_VARS } = require("../../utils/templateVars");
+const { syncSubmittedTemplates, applyTemplateStatus, applyTemplateCategory } = require("../../utils/templateStatus");
+const { toMetaPositionalBody, buildTemplateParams } = require("../../utils/templateVars");
+const {
+  PLACEHOLDER_RE,
+  headerCharError,
+  validateHeader,
+  validateButtons,
+  validateCards,
+} = require("../../utils/templateValidation");
+const { templateNeedsSetup, assertTemplateReady, isMetaSampleUrl } = require("../../utils/templateSend");
+const { mapMetaTemplate, chooseLanguageVersions, applyVariableMapping } = require("../../utils/templateImport");
+const { nameEquals, isRename, freeName, numbered } = require("../../utils/uniqueName");
 
 const VALID_CATEGORIES = ["GENERAL", "RE_ENGAGEMENT", "CAMPAIGN"];
-const VALID_STATUSES = ["DRAFT", "SUBMITTED", "APPROVED", "REJECTED"];
-const HEADER_TYPES = ["NONE", "TEXT", "IMAGE", "VIDEO", "DOCUMENT"];
-const BUTTON_TYPES = ["QUICK_REPLY", "URL", "PHONE_NUMBER"];
+const VALID_STATUSES = ["DRAFT", "SUBMITTED", "APPROVED", "REJECTED", "PAUSED", "DISABLED"];
 // Meta's own per-message billing category, mapped from this CRM's category —
 // kept in sync with the frontend's cost estimator (campaigns/new/page.tsx).
 const META_TEMPLATE_CATEGORY = { GENERAL: "UTILITY", RE_ENGAGEMENT: "MARKETING", CAMPAIGN: "MARKETING" };
 const BODY_MAX_LENGTH = 800; // kept in sync with the frontend's LIMITS.body
 const getApiVersion = () => process.env.WHATSAPP_API_VERSION || "v19.0";
-const PLACEHOLDER_RE = /\{\{\s*[a-z0-9_]+\s*\}\}/gi;
-
-// Meta rejects a text header containing newlines, emojis or WhatsApp
-// formatting characters. Placeholders are removed first — the underscore in
-// {{customer_name}} is fine, it becomes {{1}} before Meta sees it.
-const HEADER_FORBIDDEN_RE = /[\r\n*_~`]|\p{Extended_Pictographic}/u;
-const headerCharError = (text) => {
-  const bad = text.replace(/\{\{[^{}]*\}\}/g, "").match(HEADER_FORBIDDEN_RE);
-  return bad
-    ? `The header can't contain "${bad[0] === "\n" ? "a new line" : bad[0]}" — Meta doesn't allow newlines, emojis or formatting characters (* _ ~ \`) in a header`
-    : null;
-};
-
-// Validate the header type/content combination. Returns the clean triple to
-// persist — {headerType, header, headerMediaUrl} — so switching types never
-// leaves a stale value from the previous type behind.
-function validateHeader(headerType, header, headerMediaUrl) {
-  const type = headerType || "NONE";
-  if (!HEADER_TYPES.includes(type)) {
-    throw new AppError(`Invalid headerType. Must be one of: ${HEADER_TYPES.join(", ")}`, 400);
-  }
-  if (type === "NONE") return { headerType: "NONE", header: null, headerMediaUrl: null };
-  if (type === "TEXT") {
-    const text = (header || "").trim();
-    if (!text) throw new AppError("Header text is required when the header type is Text", 400);
-    if (text.length > 60) throw new AppError("Header text must be 60 characters or fewer", 400);
-    const charErr = headerCharError(text);
-    if (charErr) throw new AppError(charErr, 400);
-    // Meta allows exactly one variable in a text header.
-    const vars = listPlaceholders(text);
-    if (vars.length > 1) throw new AppError("A text header can have at most 1 placeholder", 400);
-    if (vars.length === 1 && !SUPPORTED_VARS.includes(vars[0].toLowerCase())) {
-      throw new AppError(`Unknown placeholder {{${vars[0]}}} in the header. Use one of: ${SUPPORTED_VARS.join(", ")}`, 400);
-    }
-    return { headerType: "TEXT", header: text, headerMediaUrl: null };
-  }
-  // IMAGE / VIDEO / DOCUMENT — a sample media URL is required so Meta can
-  // generate the media handle needed for approval.
-  const url = (headerMediaUrl || "").trim();
-  if (!url) throw new AppError(`A sample ${type.toLowerCase()} URL is required for a ${type.toLowerCase()} header`, 400);
-  if (!/^https?:\/\//i.test(url)) throw new AppError("Header media URL must start with http:// or https://", 400);
-  return { headerType: type, header: null, headerMediaUrl: url };
-}
-
-// Validate buttons against WhatsApp's real rules: max 3 total, titles ≤25
-// chars with no placeholders, and Quick Reply buttons can't be mixed with
-// Call/URL buttons — it's one or the other, matching Meta's own constraint.
-const validateButtons = (buttons) => {
-  if (!buttons) return null;
-  if (!Array.isArray(buttons)) throw new AppError("buttons must be an array", 400);
-  if (buttons.length === 0) return null;
-  if (buttons.length > 3) throw new AppError("Maximum 3 buttons allowed", 400);
-
-  const types = new Set();
-  let urlCount = 0;
-  let phoneCount = 0;
-
-  const cleaned = buttons.map((b) => {
-    const title = String(b?.title ?? "").trim();
-    if (!b?.id || !title) throw new AppError("Each button needs an id and a title", 400);
-    if (title.length > 25) throw new AppError(`Button title "${title}" exceeds 25 characters`, 400);
-    if (PLACEHOLDER_RE.test(title)) throw new AppError("Button titles can't contain placeholders", 400);
-
-    const type = b.type || "QUICK_REPLY";
-    if (!BUTTON_TYPES.includes(type)) throw new AppError(`Invalid button type "${type}"`, 400);
-    types.add(type);
-
-    if (type === "PHONE_NUMBER") {
-      phoneCount++;
-      const phoneNumber = String(b.phoneNumber ?? "").trim();
-      if (!phoneNumber) throw new AppError("A phone number is required for a Call Number button", 400);
-      if (!/^\+?[0-9]{7,15}$/.test(phoneNumber)) throw new AppError(`"${phoneNumber}" isn't a valid phone number`, 400);
-      return { id: b.id, type, title, phoneNumber };
-    }
-    if (type === "URL") {
-      urlCount++;
-      const url = String(b.url ?? "").trim();
-      if (!url) throw new AppError("A URL is required for a URL button", 400);
-      if (!/^https?:\/\//i.test(url)) throw new AppError("Button URL must start with http:// or https://", 400);
-      const placeholders = url.match(PLACEHOLDER_RE) || [];
-      if (placeholders.length > 1) throw new AppError("A URL button can have at most 1 placeholder", 400);
-      return { id: b.id, type, title, url };
-    }
-    return { id: b.id, type: "QUICK_REPLY", title };
-  });
-
-  if (types.has("QUICK_REPLY") && types.size > 1) {
-    throw new AppError("Buttons can't mix Quick Reply with Call Number/URL buttons — use one or the other", 400);
-  }
-  if (phoneCount > 1) throw new AppError("Only 1 Call Number button is allowed per template", 400);
-  if (urlCount > 2) throw new AppError("A maximum of 2 URL buttons is allowed per template", 400);
-
-  return cleaned;
-};
-
-// Carousel cards, validated against Meta's media-card carousel rules: 2–10
-// cards, every card the SAME shape (same media type, same button types in the
-// same order — Meta rejects a carousel whose cards differ), card text ≤160
-// characters, 1–2 buttons per card (Quick Reply and/or URL). Button ids are
-// normalized to their position (b0, b1): a tap on card 3's first button is
-// then "card 2, b0" everywhere — at send time, in flows, in the inbox.
-const CARD_MEDIA_TYPES = ["IMAGE", "VIDEO"];
-const CARD_BUTTON_TYPES = ["QUICK_REPLY", "URL"];
-const CARD_BODY_MAX = 160;
-const HAS_PLACEHOLDER = new RegExp(PLACEHOLDER_RE.source, "i"); // non-global: .test() keeps no state
-
-function validateCards(cards) {
-  if (cards === undefined || cards === null) return null;
-  if (!Array.isArray(cards)) throw new AppError("cards must be an array", 400);
-  if (cards.length < 2 || cards.length > 10) throw new AppError("A carousel needs between 2 and 10 cards", 400);
-
-  const shape = (c) => `${c.mediaType}|${(c.buttons || []).map((b) => b.type || "QUICK_REPLY").join(",")}`;
-  const cleaned = cards.map((c, i) => {
-    const n = i + 1;
-    const mediaType = c?.mediaType || "IMAGE";
-    if (!CARD_MEDIA_TYPES.includes(mediaType)) throw new AppError(`Card ${n}: media must be an image or a video`, 400);
-    const mediaUrl = String(c?.mediaUrl || "").trim();
-    if (!/^https?:\/\//i.test(mediaUrl)) throw new AppError(`Card ${n} needs its ${mediaType.toLowerCase()}`, 400);
-    const body = String(c?.body || "").trim();
-    if (!body) throw new AppError(`Card ${n} needs some text`, 400);
-    if (body.length > CARD_BODY_MAX) throw new AppError(`Card ${n}'s text is ${body.length} characters — the limit is ${CARD_BODY_MAX}`, 400);
-    if (HAS_PLACEHOLDER.test(body)) throw new AppError(`Card ${n}: placeholders aren't supported in card text`, 400);
-    const buttons = Array.isArray(c?.buttons) ? c.buttons : [];
-    if (buttons.length < 1 || buttons.length > 2) throw new AppError(`Card ${n} needs 1 or 2 buttons`, 400);
-    return {
-      mediaType,
-      mediaUrl,
-      body,
-      buttons: buttons.map((b, j) => {
-        const type = b?.type || "QUICK_REPLY";
-        if (!CARD_BUTTON_TYPES.includes(type)) throw new AppError(`Card ${n}: buttons can be Quick Reply or URL`, 400);
-        const title = String(b?.title || "").trim();
-        if (!title) throw new AppError(`Card ${n}: every button needs a title`, 400);
-        if (title.length > 25) throw new AppError(`Card ${n}: button "${title}" exceeds 25 characters`, 400);
-        if (HAS_PLACEHOLDER.test(title)) throw new AppError("Button titles can't contain placeholders", 400);
-        if (type === "URL") {
-          const url = String(b?.url || "").trim();
-          if (!/^https?:\/\//i.test(url)) throw new AppError(`Card ${n}: "${title}" needs a link starting with https://`, 400);
-          if (HAS_PLACEHOLDER.test(url)) throw new AppError(`Card ${n}: placeholders aren't supported in card links`, 400);
-          return { id: `b${j}`, type, title, url };
-        }
-        return { id: `b${j}`, type, title };
-      }),
-    };
-  });
-  const first = shape(cleaned[0]);
-  const odd = cleaned.findIndex((c) => shape(c) !== first);
-  if (odd !== -1) {
-    throw new AppError(
-      `Card ${odd + 1} is laid out differently from card 1 — every card needs the same media type and the same buttons in the same order`,
-      400,
-    );
-  }
-  return cleaned;
-}
 
 const toMetaName = (name) =>
   name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
@@ -265,16 +119,36 @@ const getTemplates = async (req, res, next) => {
       orderBy: { createdAt: "desc" },
     });
 
-    res.status(200).json({ success: true, data: templates });
+    // needsSetup: what an imported template still lacks before it can be sent
+    // ("variables", "media") — computed, never stored, so it can't go stale.
+    res.status(200).json({
+      success: true,
+      data: templates.map((t) => ({ ...t, needsSetup: templateNeedsSetup(t) })),
+    });
   } catch (err) {
     next(err);
   }
 };
 
+// Two templates with the same name are indistinguishable in the campaign
+// wizard's template picker. Unique per business account (the picker only ever
+// lists one WABA's templates) among active ones; case and surrounding spaces
+// don't count. Templates that were already duplicated before this check stay.
+async function templateNameTaken(wabaId, name, exceptId = null) {
+  const clash = await prisma.template.findFirst({
+    where: { ...nameEquals(name, exceptId), wabaId, isActive: true },
+    select: { id: true },
+  });
+  return !!clash;
+}
+const TEMPLATE_NAME_TAKEN = () => new AppError("A template with this name already exists", 409, "TEMPLATE_NAME_TAKEN");
+
 const createTemplate = async (req, res, next) => {
   try {
-    const { name, category, language, headerType, header, headerMediaUrl, body, footer, buttons } = req.body;
+    const { category, language, headerType, header, headerMediaUrl, body, footer, buttons } = req.body;
+    const name = typeof req.body.name === "string" ? req.body.name.trim() : "";
     if (!name) return next(new AppError("name is required", 400));
+    if (await templateNameTaken(req.number.wabaId, name)) return next(TEMPLATE_NAME_TAKEN());
     const cards = validateCards(req.body.cards);
     if (cards && (category || "GENERAL") === "GENERAL") {
       return next(new AppError("A carousel is a marketing template — choose Campaign or Re-engagement as the category", 400));
@@ -326,7 +200,13 @@ const updateTemplate = async (req, res, next) => {
       return next(new AppError("Cannot edit a SUBMITTED or APPROVED template", 400));
     }
 
-    const { name, category, language, headerType, header, headerMediaUrl, body, footer, buttons } = req.body;
+    const { category, language, headerType, header, headerMediaUrl, body, footer, buttons } = req.body;
+    const name = typeof req.body.name === "string" ? req.body.name.trim() : "";
+    // Only a real rename is checked (the form sends the name back on every
+    // save), and the template itself never counts as the clash.
+    if (name && isRename(existing.name, name) && (await templateNameTaken(existing.wabaId, name, id))) {
+      return next(TEMPLATE_NAME_TAKEN());
+    }
     if (category && !VALID_CATEGORIES.includes(category)) {
       return next(new AppError(`Invalid category. Must be one of: ${VALID_CATEGORIES.join(", ")}`, 400));
     }
@@ -599,6 +479,280 @@ const syncApprovalStatus = async (req, res, next) => {
   }
 };
 
+// ── Import from Meta ─────────────────────────────────────────────────────────
+//
+// Templates made in WhatsApp Manager (or by another tool) never reached the
+// CRM. This reads the active line's WABA template list and brings in what the
+// CRM can show and send faithfully; the mapping and every skip reason live in
+// utils/templateImport.js.
+
+const IMPORT_MAX_TEMPLATES = 1000;
+const META_TEMPLATE_FIELDS = "id,name,language,status,category,components,parameter_format,rejected_reason";
+
+// Every page of the WABA's template list. paging.next is followed only while
+// it points back at Graph: the token goes with each request.
+async function fetchMetaTemplates(wabaId, accessToken) {
+  const templates = [];
+  let url = `https://graph.facebook.com/${getApiVersion()}/${wabaId}/message_templates`;
+  let params = { fields: META_TEMPLATE_FIELDS, limit: 100 };
+  let truncated = false;
+  while (url) {
+    const page = await axios.get(url, { params, headers: { Authorization: `Bearer ${accessToken}` }, timeout: 20000 });
+    templates.push(...(Array.isArray(page.data?.data) ? page.data.data : []));
+    const nextUrl = page.data?.paging?.next || null;
+    if (templates.length >= IMPORT_MAX_TEMPLATES) {
+      truncated = templates.length > IMPORT_MAX_TEMPLATES || !!nextUrl;
+      break;
+    }
+    url = nextUrl && /^https:\/\/graph\.facebook\.com\//.test(nextUrl) ? nextUrl : null;
+    params = undefined; // the next link already carries the query
+  }
+  return { templates: templates.slice(0, IMPORT_MAX_TEMPLATES), truncated };
+}
+
+const importFromMeta = async (req, res, next) => {
+  try {
+    const dryRun = req.body?.dryRun === true;
+    // Scoped to the active line's WABA, like every other template route.
+    const wabaId = req.number.wabaId;
+    const credentials = await numbers.getCredentials(req.numberId);
+
+    let fetched;
+    try {
+      fetched = await fetchMetaTemplates(wabaId, credentials.accessToken);
+    } catch (metaErr) {
+      console.error("Meta template list failed:", JSON.stringify(metaErr.response?.data || metaErr.message));
+      if (!metaErr.response) {
+        return next(new AppError("Couldn't reach Meta — check the connection and try again", 502, "META_UNREACHABLE"));
+      }
+      const metaError = metaErr.response.data?.error;
+      return next(new AppError(
+        `WhatsApp didn't share this account's templates: ${metaError?.error_user_msg || metaError?.message || "unknown error"}`,
+        422,
+        "META_REJECTED",
+      ));
+    }
+
+    const metaTemplates = fetched.templates.filter((t) => t && t.name);
+    // Inactive (deleted here) rows too: [wabaId, metaTemplateName] is unique
+    // across them, so a name deleted here and recreated at Meta reuses its row.
+    const rows = await prisma.template.findMany({
+      where: { wabaId, metaTemplateName: { in: [...new Set(metaTemplates.map((t) => t.name))] } },
+    });
+    const rowByName = new Map(rows.map((r) => [r.metaTemplateName, r]));
+    const activeLanguage = new Map(rows.filter((r) => r.isActive).map((r) => [r.metaTemplateName, r.language]));
+    const { chosen, otherLanguages } = chooseLanguageVersions(metaTemplates, activeLanguage);
+
+    const imported = [];
+    const skipped = [];
+    let updated = 0;
+    // Display names handed out in this import (lower-cased). An imported
+    // template never fails on a name clash: it gets the first free
+    // "Name", "Name (2)", "Name (3)"… among this WABA's active templates and
+    // the others of this batch — also in a dry run, so the preview shows the
+    // name it will really get.
+    const namesTaken = new Set();
+
+    for (const meta of chosen) {
+      const row = rowByName.get(meta.name);
+
+      // Already here: never a duplicate — just refresh what Meta decides.
+      if (row && row.isActive) {
+        if (row.approvalStatus === "DRAFT") {
+          // A local edit not yet resubmitted: Meta's status is about the old
+          // wording, and would wrongly mark the new one approved.
+          skipped.push({ name: meta.name, language: meta.language, reason: "already in the CRM as a draft being edited — left as it is" });
+          continue;
+        }
+        updated++;
+        if (dryRun) continue;
+        if (!row.metaTemplateId && meta.id != null) {
+          await prisma.template.update({ where: { id: row.id }, data: { metaTemplateId: String(meta.id) } });
+        }
+        // The same functions the webhook and sync use: one notification, and
+        // running campaigns paused if Meta paused/disabled the template.
+        const reason = meta.rejected_reason && meta.rejected_reason !== "NONE" ? meta.rejected_reason : null;
+        await applyTemplateStatus(row, meta.status, reason, "import");
+        await applyTemplateCategory(row, meta.category, "import");
+        continue;
+      }
+
+      const mapped = mapMetaTemplate(meta);
+      if (mapped.reason) {
+        skipped.push({ name: meta.name, language: meta.language, reason: mapped.reason });
+        continue;
+      }
+
+      const name = await freeName(
+        (n) => templateNameTaken(wabaId, n, row?.id),
+        mapped.data.name,
+        numbered,
+        namesTaken,
+      );
+
+      let id = null;
+      if (!dryRun) {
+        const data = {
+          ...mapped.data,
+          name,
+          wabaId,
+          buttons: mapped.data.buttons ?? Prisma.DbNull,
+          cards: mapped.data.cards ?? Prisma.DbNull,
+          isActive: true,
+          // Not a decision Meta made "since your last visit" — no news banner.
+          statusChangedAt: null,
+        };
+        try {
+          const saved = row
+            ? await prisma.template.update({ where: { id: row.id }, data })
+            : await prisma.template.create({ data });
+          id = saved.id;
+        } catch (err) {
+          // Someone else's import got there first.
+          if (err.code === "P2002") {
+            skipped.push({ name: meta.name, language: meta.language, reason: "was imported by someone else at the same moment" });
+            continue;
+          }
+          throw err;
+        }
+      }
+      imported.push({
+        id,
+        name,
+        metaTemplateName: meta.name,
+        language: mapped.data.language,
+        status: mapped.data.approvalStatus,
+        needsSetup: mapped.needsSetup,
+      });
+    }
+
+    for (const v of otherLanguages) {
+      skipped.push({
+        name: v.name,
+        language: v.language,
+        reason: "another language version of a template imported in a different language — the CRM keeps one language per template name",
+      });
+    }
+
+    if (!dryRun) {
+      logAudit({
+        action: "template.imported",
+        actor: req.user,
+        targetType: "WhatsAppNumber",
+        targetId: req.numberId,
+        details: {
+          wabaId,
+          found: metaTemplates.length,
+          imported: imported.length,
+          updated,
+          skipped: skipped.length,
+          needsSetup: imported.filter((t) => t.needsSetup.length).length,
+          truncated: fetched.truncated,
+        },
+      });
+    }
+
+    res.status(200).json({ success: true, dryRun, imported, updated, skipped, truncated: fetched.truncated });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// A running campaign re-reads its template for every recipient; changing what
+// it sends halfway through would split one campaign into two messages.
+async function assertNotSending(templateId) {
+  const running = await prisma.campaign.findFirst({
+    where: { templateId, status: "RUNNING", deletedAt: null },
+    select: { name: true },
+  });
+  if (running) {
+    throw new AppError(`The campaign "${running.name}" is sending this template right now. Wait for it to finish or pause it first.`, 409, "TEMPLATE_IN_USE");
+  }
+}
+
+// POST /:id/map-variables — { mapping: { "1": "first_name" }, headerMapping?: { "1": "agent_name" } }
+// Says what an imported template's {{1}}, {{2}} mean, in the CRM's copy only:
+// Meta's approved template is unchanged and nothing is resubmitted.
+const mapVariables = async (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id);
+    const template = await prisma.template.findFirst({ where: { id, wabaId: req.number.wabaId } });
+    if (!template || !template.isActive) return next(new AppError("Template not found", 404));
+    const { mapping, headerMapping } = req.body || {};
+    if (!mapping && !headerMapping) return next(new AppError("mapping is required", 400));
+    await assertNotSending(id);
+
+    const { body, header } = applyVariableMapping(template, mapping, headerMapping);
+    const updated = await prisma.template.update({ where: { id }, data: { body, header } });
+
+    logAudit({
+      action: "template.variables_mapped",
+      actor: req.user,
+      targetType: "Template",
+      targetId: id,
+      details: { name: template.name, mapping: mapping || null, headerMapping: headerMapping || null },
+    });
+    res.status(200).json({ success: true, data: { ...updated, needsSetup: templateNeedsSetup(updated) } });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// PUT /:id/media — { headerMediaUrl?, cards?: [{ mediaUrl }] }
+// Gives an imported template a file of its own in place of Meta's expiring
+// sample. A template's header media is sent with every message anyway, so
+// this changes the CRM's copy only — no resubmission.
+const setTemplateMedia = async (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id);
+    const template = await prisma.template.findFirst({ where: { id, wabaId: req.number.wabaId } });
+    if (!template || !template.isActive) return next(new AppError("Template not found", 404));
+
+    const usableUrl = (value, what) => {
+      const url = String(value ?? "").trim();
+      if (!/^https?:\/\//i.test(url)) throw new AppError(`${what} must be a link starting with https://`, 400);
+      if (isMetaSampleUrl(url)) {
+        throw new AppError(`${what} is Meta's sample link, which expires — choose a file from the Media Library or upload one`, 400);
+      }
+      return url;
+    };
+
+    const data = {};
+    if (req.body?.headerMediaUrl !== undefined) {
+      if (!["IMAGE", "VIDEO", "DOCUMENT"].includes(template.headerType)) {
+        return next(new AppError("This template has no image, video or document header", 400));
+      }
+      data.headerMediaUrl = usableUrl(req.body.headerMediaUrl, "The header file");
+    }
+    if (req.body?.cards !== undefined) {
+      const cards = Array.isArray(template.cards) ? template.cards : [];
+      if (!cards.length) return next(new AppError("This template has no carousel cards", 400));
+      if (!Array.isArray(req.body.cards) || req.body.cards.length !== cards.length) {
+        return next(new AppError(`Send one entry per card (${cards.length})`, 400));
+      }
+      // An empty entry keeps that card's current file.
+      data.cards = cards.map((c, i) => {
+        const url = req.body.cards[i]?.mediaUrl;
+        return url ? { ...c, mediaUrl: usableUrl(url, `Card ${i + 1}'s file`) } : c;
+      });
+    }
+    if (Object.keys(data).length === 0) return next(new AppError("Nothing to change — send headerMediaUrl or cards", 400));
+    await assertNotSending(id);
+
+    const updated = await prisma.template.update({ where: { id }, data });
+    logAudit({
+      action: "template.media_set",
+      actor: req.user,
+      targetType: "Template",
+      targetId: id,
+      details: { name: template.name, header: data.headerMediaUrl !== undefined, cards: data.cards !== undefined },
+    });
+    res.status(200).json({ success: true, data: { ...updated, needsSetup: templateNeedsSetup(updated) } });
+  } catch (err) {
+    next(err);
+  }
+};
+
 const sendTemplate = async (req, res, next) => {
   let clientMessageId = null;
   try {
@@ -622,6 +776,9 @@ const sendTemplate = async (req, res, next) => {
       where: { id: parseInt(templateId), wabaId: req.number.wabaId },
     });
     if (!template || !template.isActive) return next(new AppError("Template not found", 404));
+    // An imported template whose variables or media aren't set up yet.
+    // buildTemplateSend refuses it too; checked first for a clean answer.
+    assertTemplateReady(template);
 
     // Credentials come from the conversation's number, which the check above has
     // already confirmed is the active one. A reply always goes out on the line
@@ -637,6 +794,10 @@ const sendTemplate = async (req, res, next) => {
     // or everywhere) needs an explicit confirmation, and is audited. Utility
     // templates (appointment details…) aren't marketing and go through.
     const isMarketing = template.metaCategory ? template.metaCategory === "MARKETING" : template.category !== "GENERAL";
+    // Agents send general and utility templates only — never marketing.
+    if (isMarketing && !roleHasPermission(req.user.role, "template:send_marketing")) {
+      return next(new AppError("Marketing templates can only be sent by a supervisor or an admin", 403, "MARKETING_NOT_ALLOWED"));
+    }
     if (isMarketing) {
       const lineOptOut = await prisma.customerOptOut.findUnique({
         where: { customerId_whatsappNumberId: { customerId: conversation.customerId, whatsappNumberId: conversation.whatsappNumberId } },
@@ -751,5 +912,8 @@ module.exports = {
   deleteTemplate,
   submitForApproval,
   syncApprovalStatus,
+  importFromMeta,
+  mapVariables,
+  setTemplateMedia,
   sendTemplate,
 };

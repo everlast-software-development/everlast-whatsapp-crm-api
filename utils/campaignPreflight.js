@@ -7,7 +7,7 @@
 const prisma = require("../config/prisma");
 const AppError = require("./AppError");
 const numbers = require("./whatsappNumbers");
-const { buildTemplateSend } = require("./templateSend");
+const { buildTemplateSend, assertTemplateReady } = require("./templateSend");
 const { getSetting } = require("./appSettings");
 
 // Meta health states that stop campaigns when Settings → Campaign safety says
@@ -47,6 +47,9 @@ function assertCampaignSendable({ template, number }) {
   }
   // Wrong business account: Meta would answer "template doesn't exist".
   numbers.assertTemplateUsable(template, number);
+  // An imported template whose {{1}}… or header media aren't set up yet
+  // (TEMPLATE_NEEDS_SETUP / TEMPLATE_NEEDS_MEDIA) — every recipient would fail.
+  assertTemplateReady(template);
   // A campaign must go out as an approved Meta template. Anything else would
   // fall back to a plain message, which Meta only accepts inside a 24-hour
   // window — i.e. it would fail for almost everyone.

@@ -9,6 +9,9 @@ const {
   deleteTemplate,
   submitForApproval,
   syncApprovalStatus,
+  importFromMeta,
+  mapVariables,
+  setTemplateMedia,
   sendTemplate,
 } = require("./template.controller");
 
@@ -21,10 +24,15 @@ router.use(protect, resolveNumber());
 
 router.get("/", requirePermission("template:read"), getTemplates);
 router.post("/sync", requirePermission("template:write"), syncApprovalStatus);
+// Pull templates made in WhatsApp Manager into the active line's WABA.
+router.post("/import", requirePermission("template:write"), importFromMeta);
 router.post("/", requirePermission("template:write"), createTemplate);
 router.put("/:id", requirePermission("template:write"), updateTemplate);
 router.delete("/:id", requirePermission("template:write"), deleteTemplate);
 router.post("/:id/submit", requirePermission("template:write"), submitForApproval);
+// Imported templates: what each {{n}} means, and a media file of our own.
+router.post("/:id/map-variables", requirePermission("template:write"), mapVariables);
+router.put("/:id/media", requirePermission("template:write"), setTemplateMedia);
 
 // Send a template in a conversation — :id is conversationId
 router.post("/conversations/:id/send-template", requirePermission("message:send"), sendTemplate);

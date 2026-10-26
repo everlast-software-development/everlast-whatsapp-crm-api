@@ -6,7 +6,59 @@
 // code. If the two ever drift, a test send stops being evidence about the real
 // one — which is the whole point of having a test send.
 
+const AppError = require("./AppError");
 const { buildTemplateParams, resolveNamedVars } = require("./templateVars");
+
+// ── Is this template ready to send? ─────────────────────────────────────────
+//
+// A template imported from Meta (utils/templateImport.js) can arrive in a state
+// the send code cannot fill in: positional {{1}} variables nobody has said the
+// meaning of, or a media header whose only file is Meta's own sample link —
+// those expire, and a send whose header link is dead fails at Meta. Both are
+// refused here, in the one function every send path goes through.
+
+const POSITIONAL_VAR_RE = /\{\{\s*\d+\s*\}\}/;
+const MEDIA_HEADERS = ["IMAGE", "VIDEO", "DOCUMENT"];
+
+// Meta's CDN hosts for the example files it shows in WhatsApp Manager. A link
+// on one of them is a sample of Meta's, not a file of ours.
+const META_SAMPLE_HOST_RE = /^https?:\/\/[^/?#]*(whatsapp\.net|fbcdn\.net|fbsbx\.com)(?:[/?#:]|$)/i;
+const isMetaSampleUrl = (url) => META_SAMPLE_HOST_RE.test(String(url || ""));
+const usableMediaUrl = (url) => /^https?:\/\//i.test(String(url || "")) && !isMetaSampleUrl(url);
+
+// [] when ready; otherwise what is missing — "variables" and/or "media".
+const templateNeedsSetup = (template) => {
+  const needs = [];
+  const headerText = template.headerType === "TEXT" ? template.header : null;
+  if (POSITIONAL_VAR_RE.test(template.body || "") || POSITIONAL_VAR_RE.test(headerText || "")) needs.push("variables");
+  const cards = Array.isArray(template.cards) ? template.cards : [];
+  if (
+    (MEDIA_HEADERS.includes(template.headerType) && !usableMediaUrl(template.headerMediaUrl)) ||
+    cards.some((c) => !usableMediaUrl(c?.mediaUrl))
+  ) {
+    needs.push("media");
+  }
+  return needs;
+};
+
+const assertTemplateReady = (template) => {
+  const needs = templateNeedsSetup(template);
+  if (needs.includes("variables")) {
+    throw new AppError(
+      `"${template.name}" is an imported template with variables that aren't set up yet — open it in Templates and choose what each one means.`,
+      409,
+      "TEMPLATE_NEEDS_SETUP",
+    );
+  }
+  if (needs.includes("media")) {
+    const what = MEDIA_HEADERS.includes(template.headerType) ? template.headerType.toLowerCase() : "card media";
+    throw new AppError(
+      `"${template.name}" has no ${what} file of its own yet (Meta's sample links expire) — open it in Templates and choose the file to send.`,
+      409,
+      "TEMPLATE_NEEDS_MEDIA",
+    );
+  }
+};
 
 /**
  * @param template a Template row
@@ -20,6 +72,9 @@ const { buildTemplateParams, resolveNamedVars } = require("./templateVars");
 const defaultCardPayload = (i, b) => `cb:${i}:${b.id}`;
 
 const buildTemplateSend = (template, customer, agent = null, { cardPayload = defaultCardPayload } = {}) => {
+  // Every send path builds its message here, so this one check covers the
+  // inbox, campaigns, test sends and flows alike.
+  assertTemplateReady(template);
   const resolvedBody = resolveNamedVars(template.body, customer, agent);
   const resolvedHeader =
     template.headerType === "TEXT" && template.header
@@ -93,4 +148,4 @@ const buildTemplateSend = (template, customer, agent = null, { cardPayload = def
   };
 };
 
-module.exports = { buildTemplateSend };
+module.exports = { buildTemplateSend, templateNeedsSetup, assertTemplateReady, isMetaSampleUrl };
