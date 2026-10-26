@@ -2,7 +2,7 @@ require("./config/env");
 const http = require("http");
 const app = require("./app");
 const connectDB = require("./config/database");
-const { initSocket } = require("./utils/socket");
+const { initSocket, startPresenceSweep } = require("./utils/socket");
 const { startCampaignScheduler } = require("./jobs/campaignScheduler");
 const { beginShutdown } = require("./modules/campaigns/campaign.controller");
 const { startTemplateStatusSync } = require("./jobs/templateStatusSync");
@@ -30,6 +30,8 @@ connectDB().then(async () => {
   server.listen(process.env.PORT, () => {
     console.log(`Server running on port ${process.env.PORT}`);
     startCampaignScheduler();
+    // Clears "Online" left behind by a restart or crash (see utils/socket.js).
+    startPresenceSweep();
     startTemplateStatusSync();
     startWebhookRecovery();
     startNumberQualityWatch();

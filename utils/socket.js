@@ -129,6 +129,38 @@ const initSocket = (httpServer) => {
   return io;
 };
 
+// The disconnect timer above lives in memory: if the server stops or crashes
+// while people are connected, nobody marks them offline and they show
+// "Online" forever. This sweep is the source of truth — anyone shown as online
+// (or on a break) with no open connection to this server is offline. Runs once
+// shortly after start-up (open browsers reconnect within seconds of a
+// restart) and then every couple of minutes. Assumes one backend instance,
+// like the rest of the app's in-memory state.
+const PRESENCE_SWEEP_MS = 2 * 60 * 1000;
+
+async function sweepPresence() {
+  if (!io) return 0;
+  const shown = await prisma.user.findMany({ where: { status: { not: "OFFLINE" } }, select: { id: true } });
+  const gone = [];
+  for (const { id } of shown) {
+    const live = await io.in(`user:${id}`).fetchSockets();
+    if (live.length === 0) gone.push(id);
+  }
+  if (gone.length) {
+    await prisma.user.updateMany({ where: { id: { in: gone }, status: { not: "OFFLINE" } }, data: { status: "OFFLINE" } });
+  }
+  return gone.length;
+}
+
+function startPresenceSweep() {
+  const run = () =>
+    sweepPresence()
+      .then((n) => n && console.log(`[Presence] marked ${n} user(s) offline (no open connection)`))
+      .catch((err) => console.error("[Presence] sweep failed:", err.message));
+  setTimeout(run, Math.max(OFFLINE_GRACE_MS, 30 * 1000));
+  setInterval(run, PRESENCE_SWEEP_MS).unref();
+}
+
 // Move a socket into exactly one number room, validating that the user may use
 // it. Falls back to the default number so a client that sends nothing still
 // receives its own traffic rather than silently receiving none.
@@ -220,4 +252,4 @@ const disconnectUser = (userId) => {
   io.in(`user:${userId}`).disconnectSockets(true);
 };
 
-module.exports = { initSocket, getIO, disconnectUser, emitToNumber, emitGlobal, emitToNumberStaff, emitToUser };
+module.exports = { initSocket, getIO, disconnectUser, emitToNumber, emitGlobal, emitToNumberStaff, emitToUser, startPresenceSweep, sweepPresence };
