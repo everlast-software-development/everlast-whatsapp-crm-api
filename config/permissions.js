@@ -141,6 +141,19 @@ const ROLE_PERMISSIONS = {
     "stats:read", "stats:team",
   ],
 
+  // Leadership (a director): follows how the clinic is doing without working
+  // in it. Every dashboard and report, the Supervision page and campaign /
+  // flow results — all read-only. No conversation:write, so never assignable
+  // and never on a team list; no conversation:assign, so no hand-overs.
+  // user:read gives the names the report filters show.
+  DIRECTOR: [
+    "stats:read", "stats:team", "stats:marketing",
+    "team:supervise",
+    "campaign:read",
+    "user:read",
+    "number:read", "number:use_any",
+  ],
+
   AGENT: [
     "conversation:read", "conversation:write", "conversation:assign",
     "message:send", "message:delete_own",

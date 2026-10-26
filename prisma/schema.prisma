@@ -14,6 +14,9 @@ enum Role {
   // An agent who also manages the agents: sees every chat and how it is
   // going (waiting, booking progress, outcomes) on the Supervision page.
   SUPERVISOR
+  // Leadership: follows performance — dashboards, reports, Supervision —
+  // without working the inbox. Read-only; never owns a chat.
+  DIRECTOR
 }
 
 // How a conversation ended up, set by the agent handling it. BOOKED always

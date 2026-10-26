@@ -14,7 +14,9 @@ router.get("/conversations", getConversations);
 router.get("/conversations/:id", getConversationTimeline);
 router.get("/activity", getActivity);
 // Move one person's open chats to a colleague / the queue.
-router.post("/hand-over", async (req, res, next) => {
+// Acting on chats, not just watching: needs conversation:assign, so a
+// read-only role (DIRECTOR) holding team:supervise can't move anyone's chats.
+router.post("/hand-over", requirePermission("conversation:assign"), async (req, res, next) => {
   try {
     const AppError = require("../../utils/AppError");
     const { handOver } = require("../../utils/handOver");
