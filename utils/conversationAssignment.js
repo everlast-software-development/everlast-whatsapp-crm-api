@@ -10,12 +10,18 @@ const logAudit = require("./audit");
 // The fields every assignment response and socket event carries about the owner.
 const ASSIGNEE_SELECT = { id: true, name: true, username: true };
 
+// Admins oversee the inbox: they can read and reply in any chat, but chats are
+// never theirs — not by hand, not by replying, not by a flow or a hand-over.
+// A role-name rule on purpose: ADMIN is "*" in config/permissions.js, so no
+// permission can be taken away from it.
+const NEVER_OWNS_CHATS = ["ADMIN"];
+const canOwnChats = (role) => !NEVER_OWNS_CHATS.includes(role) && roleHasPermission(role, "conversation:write");
+
 // An owner must be able to actually work the conversation: an active account
-// whose role can reply. Decided by permission, never by role name — so an
-// admin who can reply is assignable, and a marketing user (read-only inbox) is
-// not.
+// whose role can reply — and not an admin. A marketing user (read-only inbox)
+// is not assignable either.
 function isAssignable(user) {
-  return Boolean(user && user.isActive && roleHasPermission(user.role, "conversation:write"));
+  return Boolean(user && user.isActive && canOwnChats(user.role));
 }
 
 // Assign an UNASSIGNED conversation to the user replying in it. The WHERE clause
@@ -23,7 +29,7 @@ function isAssignable(user) {
 // reply at the same moment, exactly one update matches and the first reply wins —
 // the second never overwrites the first. Returns true if this call claimed it.
 async function claimIfUnassigned({ conversationId, numberId, user }) {
-  if (!roleHasPermission(user.role, "conversation:write")) return false;
+  if (!canOwnChats(user.role)) return false;
 
   const { count } = await prisma.conversation.updateMany({
     where: { id: conversationId, assignedAgentId: null },
@@ -48,4 +54,4 @@ async function claimIfUnassigned({ conversationId, numberId, user }) {
   return true;
 }
 
-module.exports = { ASSIGNEE_SELECT, isAssignable, claimIfUnassigned };
+module.exports = { ASSIGNEE_SELECT, isAssignable, canOwnChats, claimIfUnassigned };

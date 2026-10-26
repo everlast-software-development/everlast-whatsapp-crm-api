@@ -1,4 +1,5 @@
 const prisma = require("../../config/prisma");
+const { roleHasPermission } = require("../../config/permissions");
 const AppError = require("../../utils/AppError");
 const logAudit = require("../../utils/audit");
 const {
@@ -51,6 +52,8 @@ const getFilterFields = async (req, res, next) => {
 // quietly targeting zero people.
 const getFilterOptions = async (req, res, next) => {
   try {
+    // Agents filter contacts here too, but lists aren't theirs to see.
+    const showLists = roleHasPermission(req.user.role, "list:read");
     const [rows, nationalities, lists] = await Promise.all([
       prisma.customer.findMany({ select: { departments: true, tags: true } }),
       prisma.customer.findMany({
@@ -59,10 +62,12 @@ const getFilterOptions = async (req, res, next) => {
         distinct: ["nationality"],
         orderBy: { nationality: "asc" },
       }),
-      prisma.contactList.findMany({
-        select: { id: true, name: true, _count: { select: { members: true } } },
-        orderBy: { name: "asc" },
-      }),
+      showLists
+        ? prisma.contactList.findMany({
+            select: { id: true, name: true, _count: { select: { members: true } } },
+            orderBy: { name: "asc" },
+          })
+        : [],
     ]);
 
     const departments = new Set();

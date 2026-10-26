@@ -33,14 +33,16 @@ router.use(protect, resolveNumber({ optional: true }));
 // audience is a different act from authoring the rule a bulk send targets.
 
 // ── Rule vocabulary (must precede "/:id") ──────────────────────────────────
-router.get("/fields", requirePermission("segment:read"), getFilterFields);
-router.get("/options", requirePermission("segment:read"), getFilterOptions);
+// The contacts page's filter panel uses these too, so contact:read is enough
+// (agents filter contacts without seeing saved segments).
+router.get("/fields", requirePermission("contact:read"), getFilterFields);
+router.get("/options", requirePermission("contact:read"), getFilterOptions);
 
 // ── Ad-hoc preview: count an unsaved rule (must precede "/:id") ────────────
 // POST rather than GET because a definition is a nested object, and it is a
 // read either way — hence segment:read, not segment:write. Each call is a
 // COUNT plus a 12-row sample.
-router.post("/preview", requirePermission("segment:read"), previewSegment);
+router.post("/preview", requirePermission("contact:read"), previewSegment);
 
 // ── CRUD ───────────────────────────────────────────────────────────────────
 router.get("/", requirePermission("segment:read"), getAllSegments);

@@ -5,6 +5,7 @@ const logAudit = require("../../utils/audit");
 const { ROLES, roleHasPermission } = require("../../config/permissions");
 const { disconnectUser } = require("../../utils/socket");
 const { handOver, hasHistory } = require("../../utils/handOver");
+const { canOwnChats } = require("../../utils/conversationAssignment");
 const { issueAuthCookie } = require("../auth/auth.controller");
 
 // Taken from the permission table rather than typed out here. This list was
@@ -73,11 +74,23 @@ const getUserById = async (req, res, next) => {
   }
 };
 
+// Usernames are compared without regard to capitals or surrounding spaces:
+// "Mohamed" and "mohamed " are the same person at the sign-in box, and two
+// accounts that look alike are how the wrong one gets edited.
+const USERNAME_TAKEN = () => new AppError("This username is already in use", 409, "USERNAME_TAKEN");
+const usernameInUse = (username, exceptId) =>
+  prisma.user.findFirst({
+    where: { username: { equals: username, mode: "insensitive" }, ...(exceptId ? { id: { not: exceptId } } : {}) },
+    select: { id: true },
+  });
+
 // ── Admin: create agent ───────────────────────────────────────────────────────
 const createUser = async (req, res, next) => {
   try {
-    const { name, username, password, role = "AGENT" } = req.body;
+    const { name, password, role = "AGENT" } = req.body;
+    const username = typeof req.body.username === "string" ? req.body.username.trim() : "";
     if (!username || !password) return next(new AppError("Username and password are required", 400));
+    if (await usernameInUse(username)) return next(USERNAME_TAKEN());
     if (password.length < 8) return next(new AppError("Password must be at least 8 characters", 400));
     if (!ROLES.includes(role)) return next(roleError());
 
@@ -97,7 +110,7 @@ const createUser = async (req, res, next) => {
 
     res.status(201).json({ success: true, data: user });
   } catch (err) {
-    if (err.code === "P2002") return next(new AppError("Username already taken", 409));
+    if (err.code === "P2002") return next(USERNAME_TAKEN());
     next(err);
   }
 };
@@ -112,7 +125,12 @@ const updateUser = async (req, res, next) => {
 
     const data = {};
     if (name !== undefined) data.name = name;
-    if (username !== undefined) data.username = username;
+    if (username !== undefined) {
+      const clean = typeof username === "string" ? username.trim() : "";
+      if (!clean) return next(new AppError("Username is required", 400));
+      if (await usernameInUse(clean, targetId)) return next(USERNAME_TAKEN());
+      data.username = clean;
+    }
     if (role !== undefined) {
       if (!ROLES.includes(role)) return next(roleError());
       // Changing your own role could only ever lock you out of the screen you
@@ -171,7 +189,7 @@ const updateUser = async (req, res, next) => {
     res.status(200).json({ success: true, data: user, handedOver });
   } catch (err) {
     if (err.code === "P2025") return next(new AppError("User not found", 404));
-    if (err.code === "P2002") return next(new AppError("Username already taken", 409));
+    if (err.code === "P2002") return next(USERNAME_TAKEN());
     next(err);
   }
 };
@@ -251,7 +269,7 @@ const PRESENCE_ORDER = { ONLINE: 0, ON_BREAK: 1, OFFLINE: 2 };
 
 const getAssignableUsers = async (req, res, next) => {
   try {
-    const roles = ROLES.filter((r) => roleHasPermission(r, "conversation:write"));
+    const roles = ROLES.filter(canOwnChats);
     const users = await prisma.user.findMany({
       where: { isActive: true, role: { in: roles } },
       select: { id: true, name: true, username: true, status: true },
@@ -298,6 +316,11 @@ const updateMyStatus = async (req, res, next) => {
     if (!["ONLINE", "OFFLINE", "ON_BREAK"].includes(status)) {
       return next(new AppError("Status must be ONLINE, OFFLINE, or ON_BREAK", 400));
     }
+    // Breaks and end-of-shift hand-overs are for people working the inbox in
+    // shifts; admins don't take a break from the queue.
+    if (status === "ON_BREAK" && req.user.role === "ADMIN") {
+      return next(new AppError("Admins don't have a break status", 400));
+    }
 
     const user = await prisma.user.update({
       where: { id: req.user.id },
@@ -315,6 +338,7 @@ const updateMyStatus = async (req, res, next) => {
 // To a colleague (`toUserId`) or back to the shared queue (none given).
 const handOverMine = async (req, res, next) => {
   try {
+    if (req.user.role === "ADMIN") return next(new AppError("Admins don't hand over a queue — reassign chats from the inbox instead", 400));
     const result = await handOver(req.user.id, req.body?.toUserId ?? null, req.user, { reason: "end of shift" });
     res.status(200).json({ success: true, data: result });
   } catch (err) {

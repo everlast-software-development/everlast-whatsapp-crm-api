@@ -43,6 +43,10 @@ const ALL_PERMISSIONS = [
   // Templates
   "template:read",
   "template:write",
+  // Sending a MARKETING template (offers, re-engagement) inside a chat. Without
+  // it a person can still send GENERAL and Meta UTILITY templates (appointment
+  // details, confirmations). ADMIN and SUPERVISOR; agents never send marketing.
+  "template:send_marketing",
   // Campaigns
   "campaign:read",
   "campaign:write",
@@ -129,7 +133,7 @@ const ROLE_PERMISSIONS = {
     "contact:read", "contact:write",
     "list:read",
     "segment:read",
-    "template:read",
+    "template:read", "template:send_marketing",
     "media:upload", "media:read",
     "number:read", "number:use_any",
     "team:supervise",
@@ -143,13 +147,12 @@ const ROLE_PERMISSIONS = {
     // Kept per product decision: an agent on the phone needs to add a walk-in
     // or fix a wrong number. Imports and bulk delete are not granted.
     "contact:read", "contact:write",
-    "list:read",
-    // Read-only, exactly as with lists: an agent may look at an audience while
-    // working a conversation, but authoring the rule a bulk send targets is not
-    // theirs to do.
-    "segment:read",
+    // No list:read / segment:read: lists and saved segments are audiences for
+    // campaigns, which agents don't run. Filtering the contacts page still
+    // works — its filter helpers need only contact:read.
     // Load-bearing: this is what lets an agent pick a template to send inside a
-    // conversation. Template *administration* is template:write.
+    // conversation. Template *administration* is template:write. No
+    // template:send_marketing: agents send GENERAL and UTILITY templates only.
     "template:read",
     // No campaign permissions. The server supports an agent drafting a campaign
     // and submitting it for approval (the controller limits anyone with
