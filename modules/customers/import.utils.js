@@ -5,30 +5,42 @@ const { parsePhoneNumberFromString } = require("libphonenumber-js");
 const AppError = require("../../utils/AppError");
 
 // Validate & normalize a phone to WhatsApp-sendable international format (digits,
-// no '+'). A number that carries its own country code is auto-detected (any
-// country). A bare local number is interpreted using `country` (ISO-2, e.g.
-// "AE"); with "auto" and no code the country is unknowable, so it's flagged.
+// no "+"). Mirrors checkPhone in the frontend's lib/customerImport.ts.
+//   1. With its own code ("+20…", "0020…", or the bare digits "20122…") the
+//      number is read as international — any country, the whole Arab world
+//      included.
+//   2. Otherwise it is a local number: tried as the chosen country first, then
+//      the clinic's two home countries, UAE then Egypt ("0501229822",
+//      "501229822", "01012345678" all resolve).
+// Only mobile numbers pass — a landline can't receive WhatsApp.
 // Returns { phone } on success or { error } otherwise.
+const LOCAL_FALLBACK = ["AE", "EG"];
+
+function readMobile(text, country) {
+  let pn;
+  try { pn = country ? parsePhoneNumberFromString(text, country) : parsePhoneNumberFromString(text); } catch { pn = null; }
+  return pn && pn.isValid() ? pn : null;
+}
+
 function normalizeImportPhone(raw, country) {
   const s = (raw ?? "").toString().trim();
   if (!s) return { error: "Missing phone number" };
   const intl = s.replace(/^00/, "+"); // a leading 00 is the international prefix
-  // A number carrying its own code auto-detects; code-less numbers fall back to
-  // the chosen country, defaulting to UAE ("AE").
-  const useCountry = country && country !== "auto" ? country : "AE";
-  let pn;
-  // Digits already in international form without the "+" (e.g. 201000682552,
-  // which is what the contact form sends) must not be read as a UAE local
-  // number. Try them as international first. 10+ digits and no leading 0 keeps
-  // real local numbers (UAE mobile without the 0 is 9 digits) on the fallback.
-  if (/^[1-9]\d{9,14}$/.test(intl.replace(/[\s\-().]/g, ""))) {
-    try { pn = parsePhoneNumberFromString(`+${intl.replace(/\D/g, "")}`); } catch { pn = null; }
-    if (!pn || !pn.isValid()) pn = null;
-  }
+  const digits = intl.replace(/\D/g, "");
+  let pn = null;
+  if (intl.startsWith("+")) pn = readMobile("+" + digits);
+  // International digits without the "+". 10+ digits and no leading 0, so a
+  // real local number (UAE mobile without its 0 is 9 digits) isn't misread.
+  if (!pn && /^[1-9]\d{9,14}$/.test(digits)) pn = readMobile("+" + digits);
   if (!pn) {
-    try { pn = parsePhoneNumberFromString(intl, useCountry); } catch { pn = null; }
+    const tryOrder = [...new Set([country && country !== "auto" ? country : null, ...LOCAL_FALLBACK].filter(Boolean))];
+    for (const c of tryOrder) {
+      pn = readMobile(intl, c);
+      if (pn && pn.getType() !== "FIXED_LINE") break;
+      pn = null;
+    }
   }
-  if (pn && pn.isValid()) {
+  if (pn) {
     if (pn.getType() === "FIXED_LINE") return { error: "Landline — can't receive WhatsApp" };
     return { phone: pn.number.replace(/^\+/, "") };
   }
