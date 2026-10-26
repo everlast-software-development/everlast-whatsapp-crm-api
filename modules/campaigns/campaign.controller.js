@@ -5,7 +5,7 @@ const AppError = require("../../utils/AppError");
 const { sendWhatsAppMessage } = require("../../utils/whatsappClient");
 const { emitToNumber } = require("../../utils/socket");
 const numbers = require("../../utils/whatsappNumbers");
-const { buildTemplateSend } = require("../../utils/templateSend");
+const { buildTemplateSend, assertTemplateReady } = require("../../utils/templateSend");
 const { parsePhoneNumberFromString } = require("libphonenumber-js");
 const logAudit = require("../../utils/audit");
 const { resolveMemberIds } = require("../../utils/segmentFilter");
@@ -15,6 +15,7 @@ const { classifySendError } = require("../../utils/campaignSendErrors");
 const { assertCampaignSendable, checkCampaignSendable, isTemplateProblem } = require("../../utils/campaignPreflight");
 const { getCampaignCapacity } = require("../../utils/messagingCapacity");
 const { getSetting } = require("../../utils/appSettings");
+const { nameEquals, isRename, freeName, numbered } = require("../../utils/uniqueName");
 
 // How many recipients are sent to WhatsApp at once per campaign. Meta's Cloud
 // API throughput ceiling per phone number is far above this (tens of
@@ -1223,9 +1224,38 @@ async function resolveFlowId(raw) {
   return flow.id;
 }
 
+// Two campaigns with the same name are indistinguishable on the campaigns
+// list, the approvals queue and the Marketing dashboard. Unique across every
+// line among campaigns that aren't deleted; case and surrounding spaces don't
+// count. Campaigns that were already duplicated before this check stay.
+async function campaignNameTaken(name, exceptId = null) {
+  const clash = await prisma.campaign.findFirst({
+    where: { ...nameEquals(name, exceptId), deletedAt: null },
+    select: { id: true },
+  });
+  return !!clash;
+}
+const CAMPAIGN_NAME_TAKEN = () => new AppError("A campaign with this name already exists", 409, "CAMPAIGN_NAME_TAKEN");
+
+// ─── GET /api/campaigns/name-available?name= ─────────────────────────────────
+// For the wizard's suggested name: { available, suggestion } where suggestion
+// is the first free "X", "X (2)", "X (3)"… so the default doesn't clash.
+const getCampaignNameAvailability = async (req, res, next) => {
+  try {
+    const name = String(req.query.name || "").trim();
+    if (!name) return next(new AppError("name is required", 400));
+    const available = !(await campaignNameTaken(name));
+    const suggestion = available ? name : await freeName((n) => campaignNameTaken(n), name, numbered);
+    res.json({ success: true, data: { available, suggestion } });
+  } catch (err) {
+    next(err);
+  }
+};
+
 const createCampaign = async (req, res, next) => {
   try {
-    const { name, templateId, recipientIds, segmentId, audienceLists, scheduledAt, category } = req.body;
+    const { templateId, recipientIds, segmentId, audienceLists, scheduledAt, category } = req.body;
+    const name = typeof req.body.name === "string" ? req.body.name.trim() : "";
     if (!name) return next(new AppError("name is required", 400));
     const flowId = await resolveFlowId(req.body.flowId);
     if (!templateId) return next(new AppError("templateId is required", 400));
@@ -1237,9 +1267,12 @@ const createCampaign = async (req, res, next) => {
     const template = await prisma.template.findUnique({ where: { id: parseInt(templateId) } });
     if (!template || !template.isActive) return next(new AppError("Template not found", 404));
     if (template.approvalStatus !== "APPROVED") return next(new AppError("Template must be APPROVED before creating a campaign", 400));
+    // An imported template still missing its variables or media.
+    assertTemplateReady(template);
     // Earliest possible feedback on a WABA mismatch — far better than a confusing
     // "template name unknown" from Meta at send time.
     numbers.assertTemplateUsable(template, req.number);
+    if (await campaignNameTaken(name)) return next(CAMPAIGN_NAME_TAKEN());
 
     // The audience is resolved against the SAME number the campaign will send
     // from, and that id is persisted below. If the two disagreed, the frozen
@@ -1400,11 +1433,17 @@ const updateCampaign = async (req, res, next) => {
       const template = await prisma.template.findUnique({ where: { id: parseInt(templateId) } });
       if (!template || !template.isActive) return next(new AppError("Template not found", 404));
       if (template.approvalStatus !== "APPROVED") return next(new AppError("Template must be APPROVED before it can be used in a campaign", 400));
+      assertTemplateReady(template);
       numbers.assertTemplateUsable(template, req.number);
     }
 
     const data = {};
-    if (name) data.name = name;
+    if (typeof name === "string" && name.trim()) {
+      // Only a real rename is checked (the wizard sends the name back on every
+      // save), and the campaign itself never counts as the clash.
+      if (isRename(existing.name, name) && (await campaignNameTaken(name, id))) return next(CAMPAIGN_NAME_TAKEN());
+      data.name = name.trim();
+    }
     if (category) data.category = category;
     if (templateId) data.templateId = parseInt(templateId);
     if (flowId !== undefined) data.flowId = flowId;
@@ -2073,6 +2112,8 @@ const testSendTemplate = async (req, res, next) => {
       where: { id: Number(templateId) },
     });
     if (!template) return next(new AppError("Template not found", 404));
+    // Before the rate-limit slot: a template that can't be sent shouldn't use one up.
+    assertTemplateReady(template);
     if (!takeTestSendSlot(req.user.id)) {
       return next(new AppError(`You've sent ${TEST_SENDS_PER_HOUR} tests in the last hour. Please wait a bit before sending another.`, 429, "TEST_SEND_LIMIT"));
     }
@@ -2170,6 +2211,7 @@ module.exports = {
   getActiveCampaignProgress,
   getQuietHours,
   getCampaign,
+  getCampaignNameAvailability,
   createCampaign,
   updateCampaign,
   deleteCampaign,

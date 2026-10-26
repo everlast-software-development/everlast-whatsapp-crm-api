@@ -7,6 +7,7 @@ const {
   getActiveCampaignProgress,
   getQuietHours,
   getCampaign,
+  getCampaignNameAvailability,
   getCampaignReplies,
   createCampaign,
   updateCampaign,
@@ -51,6 +52,9 @@ router.get("/", requirePermission("campaign:read"), getCampaigns);
 // as an :id param and route it to getCampaign instead.
 router.get("/active-progress", requirePermission("campaign:read"), getActiveCampaignProgress);
 router.get("/quiet-hours", requirePermission("campaign:read"), getQuietHours);
+// Whether a campaign name is free (names are unique among non-deleted
+// campaigns) — the wizard uses it to suggest a default that doesn't clash.
+router.get("/name-available", requirePermission("campaign:read"), getCampaignNameAvailability);
 // Waiting for approval, all numbers — admins (campaign:send) only.
 router.get("/pending-approval", requirePermission("campaign:send"), getPendingApprovals);
 

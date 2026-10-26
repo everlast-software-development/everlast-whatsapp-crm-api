@@ -4,6 +4,7 @@ const logAudit = require("../../utils/audit");
 const { validateGraph, variablesOf } = require("../../utils/flowGraph");
 const { expireStaleRuns } = require("../../utils/flowEngine");
 const { roleHasPermission } = require("../../config/permissions");
+const { nameEquals, isRename, freeName, copied } = require("../../utils/uniqueName");
 
 const RUN_STATUSES = ["ACTIVE", "COMPLETED", "HANDED_OFF", "STOPPED", "EXPIRED", "FAILED"];
 
@@ -42,6 +43,17 @@ const flowInUse = (campaign) =>
     409,
     "FLOW_IN_USE",
   );
+
+// Two flows with the same name are indistinguishable in the campaign wizard's
+// flow picker. Unique among all flows (a deleted flow is really deleted; a
+// turned-off one still shows in the list); case and surrounding spaces don't
+// count. Flows that were already duplicated before this check stay.
+const NAME_MAX = 120;
+async function flowNameTaken(name, exceptId = null) {
+  const clash = await prisma.flow.findFirst({ where: nameEquals(name, exceptId), select: { id: true } });
+  return !!clash;
+}
+const FLOW_NAME_TAKEN = () => new AppError("A flow with this name already exists", 409, "FLOW_NAME_TAKEN");
 
 // Run counts per status for a set of flows: { [flowId]: { total, ACTIVE, ... } }.
 async function runStats(flowIds) {
@@ -104,14 +116,15 @@ const getFlow = async (req, res, next) => {
 // ─── POST /api/campaigns/flows ───────────────────────────────────────────────
 const createFlow = async (req, res, next) => {
   try {
-    const name = String(req.body.name || "").trim();
+    const name = String(req.body.name || "").trim().slice(0, NAME_MAX).trim();
     if (!name) return next(new AppError("Give the flow a name", 400));
     const { graph, errors } = validateGraph(req.body.graph);
     if (errors.length) return invalidGraph(res, errors);
+    if (await flowNameTaken(name)) return next(FLOW_NAME_TAKEN());
 
     const flow = await prisma.flow.create({
       data: {
-        name: name.slice(0, 120),
+        name,
         description: String(req.body.description || "").trim().slice(0, 500) || null,
         isActive: req.body.isActive !== false,
         graph,
@@ -133,7 +146,7 @@ const updateFlow = async (req, res, next) => {
   try {
     const id = parseId(req.params.id);
     if (!id) return next(new AppError("Invalid flow id", 400));
-    const existing = await prisma.flow.findUnique({ where: { id }, select: { id: true, updatedAt: true } });
+    const existing = await prisma.flow.findUnique({ where: { id }, select: { id: true, name: true, updatedAt: true } });
     if (!existing) return next(new AppError("Flow not found", 404));
     const locked = await lockingCampaign(id);
     const isAdmin = roleHasPermission(req.user.role, "campaign:send");
@@ -155,9 +168,12 @@ const updateFlow = async (req, res, next) => {
 
     const data = {};
     if (req.body.name !== undefined) {
-      const name = String(req.body.name).trim();
+      const name = String(req.body.name).trim().slice(0, NAME_MAX).trim();
       if (!name) return next(new AppError("Give the flow a name", 400));
-      data.name = name.slice(0, 120);
+      // Only a real rename is checked (the editor sends the name back on every
+      // save), and the flow itself never counts as the clash.
+      if (isRename(existing.name, name) && (await flowNameTaken(name, id))) return next(FLOW_NAME_TAKEN());
+      data.name = name;
     }
     if (req.body.description !== undefined) data.description = String(req.body.description || "").trim().slice(0, 500) || null;
     if (req.body.isActive !== undefined) data.isActive = Boolean(req.body.isActive);
@@ -178,6 +194,33 @@ const updateFlow = async (req, res, next) => {
       },
     });
     res.json({ success: true, data: { ...flow, variables: variablesOf(flow.graph) } });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─── POST /api/campaigns/flows/:id/duplicate ─────────────────────────────────
+// A copy to change freely (e.g. when the original is locked by a submitted
+// campaign). Picks the first free "X (copy)", "X (copy 2)"… so duplicating
+// never fails on the name. The copy starts on, with no runs and no campaigns.
+const duplicateFlow = async (req, res, next) => {
+  try {
+    const id = parseId(req.params.id);
+    if (!id) return next(new AppError("Invalid flow id", 400));
+    const source = await prisma.flow.findUnique({ where: { id }, select: { id: true, name: true, description: true, graph: true } });
+    if (!source) return next(new AppError("Flow not found", 404));
+
+    // Room for the longest suffix within the name limit.
+    const base = source.name.trim().slice(0, NAME_MAX - 12).trim() || "Flow";
+    const name = await freeName((n) => flowNameTaken(n), base, copied);
+    const flow = await prisma.flow.create({
+      data: { name, description: source.description, isActive: true, graph: source.graph, createdById: req.user.id },
+    });
+    logAudit({
+      action: "flow.created", actor: req.user, targetType: "flow", targetId: flow.id,
+      details: { name: flow.name, duplicatedFrom: { id: source.id, name: source.name } },
+    });
+    res.status(201).json({ success: true, data: { ...flow, variables: variablesOf(flow.graph) } });
   } catch (err) {
     next(err);
   }
@@ -212,6 +255,9 @@ const deleteFlow = async (req, res, next) => {
 
 // ─── GET /api/campaigns/flows/:id/runs?status=&page=&limit= ──────────────────
 // The flow's responses: who went through it, where they ended, what they gave.
+// When each flow last had its abandoned runs marked EXPIRED (see listFlowRuns).
+const lastExpiredAt = new Map();
+
 const listFlowRuns = async (req, res, next) => {
   try {
     const id = parseId(req.params.id);
@@ -219,7 +265,12 @@ const listFlowRuns = async (req, res, next) => {
     const flow = await prisma.flow.findUnique({ where: { id }, select: { id: true, graph: true } });
     if (!flow) return next(new AppError("Flow not found", 404));
 
-    await expireStaleRuns({ flowId: id });
+    // At most once a minute per flow: the update is a full round trip to the
+    // database, and paging or filtering the list shouldn't pay for it again.
+    if ((lastExpiredAt.get(id) || 0) < Date.now() - 60 * 1000) {
+      lastExpiredAt.set(id, Date.now());
+      await expireStaleRuns({ flowId: id });
+    }
 
     const page = Math.max(1, parseInt(req.query.page) || 1);
     const limit = Math.min(500, Math.max(1, parseInt(req.query.limit) || 50));
@@ -256,4 +307,4 @@ const listFlowRuns = async (req, res, next) => {
   }
 };
 
-module.exports = { listFlows, getFlow, createFlow, updateFlow, deleteFlow, listFlowRuns };
+module.exports = { listFlows, getFlow, createFlow, duplicateFlow, updateFlow, deleteFlow, listFlowRuns };
