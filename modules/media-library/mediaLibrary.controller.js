@@ -58,7 +58,7 @@ const uploadMedia = async (req, res, next) => {
     });
   } catch (error) {
     console.error("Storage upload error:", error.message);
-    return next(new AppError("File upload failed", 502));
+    return next(storage.uploadFailedError(error));
   }
 
   try {

@@ -36,4 +36,15 @@ async function deleteObject({ key, mediaType }) {
     : cloudinaryStorage.deleteObject({ key, mediaType });
 }
 
-module.exports = { uploadBuffer, deleteObject, activeProvider };
+// The answer an upload route gives when storage throws. Never 502: behind
+// Cloudflare a 502 is swapped for its own "Bad gateway" page, so the reason
+// never reaches the screen. Missing settings say so plainly.
+function uploadFailedError(error) {
+  const AppError = require("./AppError");
+  if (/not configured/i.test(error?.message || "")) {
+    return new AppError(`File storage isn't set up on the server (${provider()} settings missing)`, 503, "STORAGE_NOT_CONFIGURED");
+  }
+  return new AppError("File upload failed", 500, "UPLOAD_FAILED");
+}
+
+module.exports = { uploadBuffer, deleteObject, activeProvider, uploadFailedError };
