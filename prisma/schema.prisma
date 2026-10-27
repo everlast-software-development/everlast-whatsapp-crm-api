@@ -660,6 +660,36 @@ model AuditLog {
   @@index([createdAt])
 }
 
+// Things that went wrong while nobody was watching — a webhook that couldn't be
+// processed, a message Meta refused or couldn't deliver, a flow that failed, a
+// job that crashed, a 500. Written by utils/errorLog.js; read by admins on the
+// Audit Log's Errors tab. The same problem repeating is ONE row with a count
+// (grouped by fingerprint while unresolved), so a failing campaign doesn't
+// bury everything else.
+model ErrorLog {
+  id               Int       @id @default(autoincrement())
+  // webhook | delivery | send | flow | campaign | api | job | templates | number | system
+  source           String
+  // Meta's error code (131026…) or ours (NUMBER_INACTIVE…), when there is one.
+  code             String?
+  message          String
+  fingerprint      String
+  count            Int       @default(1)
+  details          Json?
+  conversationId   Int?
+  campaignId       Int?
+  flowRunId        Int?
+  whatsappNumberId Int?
+  firstSeenAt      DateTime  @default(now())
+  lastSeenAt       DateTime  @default(now())
+  resolvedAt       DateTime?
+  resolvedById     Int?
+
+  @@index([lastSeenAt])
+  @@index([fingerprint, resolvedAt])
+  @@index([source, lastSeenAt])
+}
+
 // ─── Flows (campaign automation) ─────────────────────────────────────────────
 // A Flow is a saved graph: a trigger (the campaign template's buttons) and the
 // steps that follow — messages with buttons, lists, questions that collect
