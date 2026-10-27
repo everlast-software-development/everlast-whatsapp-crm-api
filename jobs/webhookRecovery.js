@@ -1,6 +1,7 @@
 const cron = require("node-cron");
 const prisma = require("../config/prisma");
 const { processWebhookEvent } = require("../modules/webhooks/webhook.controller");
+const { reportError, logError, pruneErrorLog } = require("../utils/errorLog");
 
 // Re-handles Meta webhook deliveries that were saved but never finished — the
 // process died mid-handling, or handling threw (database blip). Meta already
@@ -34,6 +35,7 @@ async function recoverWebhookEvents({ ids } = {}) {
     if (await processWebhookEvent(event)) recovered++;
     else if (event.attempts + 1 >= MAX_ATTEMPTS) {
       console.error(`[Webhooks] giving up on event ${event.id} after ${MAX_ATTEMPTS} attempts — see its lastError`);
+      logError({ source: "webhook", message: `Gave up on an incoming WhatsApp delivery after ${MAX_ATTEMPTS} tries — it was never processed`, details: { eventId: event.id, lastError: event.lastError } });
     }
   }
   if (events.length) console.log(`[Webhooks] recovery: ${recovered}/${events.length} unfinished deliveries handled`);
@@ -50,10 +52,11 @@ async function pruneWebhookEvents() {
 
 function startWebhookRecovery() {
   cron.schedule("* * * * *", () => {
-    recoverWebhookEvents().catch((err) => console.error("[Webhooks] recovery failed:", err.message));
+    recoverWebhookEvents().catch((err) => reportError("job", "[Webhooks] recovery failed", err));
   });
   cron.schedule("17 3 * * *", () => {
-    pruneWebhookEvents().catch((err) => console.error("[Webhooks] prune failed:", err.message));
+    pruneWebhookEvents().catch((err) => reportError("job", "[Webhooks] prune failed", err));
+    pruneErrorLog().catch((err) => console.error("[Errors] prune failed:", err.message));
   });
   console.log("[Webhooks] recovery started (every minute)");
 }

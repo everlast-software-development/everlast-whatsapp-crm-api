@@ -1,6 +1,7 @@
 const cron = require("node-cron");
 const prisma = require("../config/prisma");
 const { emitToUser, emitToNumberStaff } = require("../utils/socket");
+const { reportError } = require("../utils/errorLog");
 
 // "Follow up" used to rely on someone remembering. Every few minutes, chats
 // whose follow-up time has come get one reminder: to the agent who owns the
@@ -39,7 +40,7 @@ async function sendFollowUpReminders() {
 
 function startFollowUpReminders() {
   cron.schedule("*/5 * * * *", () => {
-    sendFollowUpReminders().catch((err) => console.error("[FollowUps] reminders failed:", err.message));
+    sendFollowUpReminders().catch((err) => reportError("job", "[FollowUps] reminders failed", err));
   });
   console.log("[FollowUps] reminders started (every 5 min)");
 }

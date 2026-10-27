@@ -9,6 +9,7 @@ const { windowState, windowClosedError } = require("../../utils/messagingWindow"
 const numbers = require("../../utils/whatsappNumbers");
 const { handOffOnAgentReply } = require("../../utils/flowEngine");
 const { readClientMessageId, findDuplicateSend, isClientIdRace, assertMayReply } = require("../../utils/replyGuards");
+const { logError } = require("../../utils/errorLog");
 
 const sendMessage = async (req, res, next) => {
   let clientMessageId = null;
@@ -114,6 +115,15 @@ const sendMessage = async (req, res, next) => {
     } catch (waErr) {
       const errDetail = waErr.response?.data || waErr.message;
       console.error("WhatsApp send failed:", JSON.stringify(errDetail));
+      const metaErr = waErr.response?.data?.error;
+      logError({
+        source: "send",
+        code: metaErr?.code,
+        message: `Meta refused an inbox message: ${metaErr?.error_data?.details || metaErr?.message || waErr.message}`,
+        error: waErr,
+        details: { messageType, sentBy: req.user?.username },
+        conversationId: parseInt(conversationId),
+      });
       message = await prisma.message.update({
         where: { id: message.id },
         data: { status: "FAILED" },

@@ -1,5 +1,6 @@
 const cron = require("node-cron");
 const { syncSubmittedTemplates } = require("../utils/templateStatus");
+const { reportError } = require("../utils/errorLog");
 
 // Backstop for the message_template_status_update webhook: if Meta's webhook
 // never reaches us (tunnel down in dev, app unpublished), approvals are still
@@ -9,7 +10,7 @@ function startTemplateStatusSync() {
     try {
       await syncSubmittedTemplates();
     } catch (err) {
-      console.error("[Templates] status sync failed:", err.message);
+      reportError("templates", "[Templates] status sync failed", err);
     }
   });
   console.log("[Templates] status sync started (every 5 min)");

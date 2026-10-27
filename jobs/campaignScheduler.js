@@ -3,6 +3,7 @@ const prisma = require("../config/prisma");
 const { processCampaign } = require("../modules/campaigns/campaign.controller");
 const { isQuietHours } = require("../utils/quietHours");
 const logAudit = require("../utils/audit");
+const { reportError } = require("../utils/errorLog");
 
 // Carry on campaigns a dead process left RUNNING: crashed, killed, or
 // redeployed mid-send. Only campaigns whose send lease has expired (or was
@@ -22,7 +23,7 @@ async function recoverInterruptedCampaigns({ campaignIds } = {}) {
   for (const c of stuck) {
     console.log(`[Scheduler] Resuming interrupted campaign ${c.id}`);
     processCampaign(c.id).catch((err) =>
-      console.error(`[Scheduler] Resume of campaign ${c.id} failed:`, err.message)
+      reportError("job", `[Scheduler] Resume of campaign ${c.id} failed`, err)
     );
   }
   return stuck.length;
@@ -36,7 +37,7 @@ async function schedulerTick({ campaignIds } = {}) {
   // Every minute, not just at boot: a lease that expires after startup (an
   // instance that died while this one was already up) is picked up too.
   await recoverInterruptedCampaigns({ campaignIds }).catch((err) =>
-    console.error("[Scheduler] Failed to recover running campaigns:", err.message)
+    reportError("job", "[Scheduler] Failed to recover running campaigns", err)
   );
 
   // Inside quiet hours nothing starts: due campaigns stay SCHEDULED and go
@@ -74,11 +75,11 @@ async function schedulerTick({ campaignIds } = {}) {
         details: { name: c.name, reason: c.pauseReason, sentCount: c.sentCount, totalRecipients: c.totalRecipients },
       });
       processCampaign(c.id).catch((err) =>
-        console.error(`[Scheduler] Resume of campaign ${c.id} failed:`, err.message)
+        reportError("job", `[Scheduler] Resume of campaign ${c.id} failed`, err)
       );
     }
   } catch (err) {
-    console.error("[Scheduler] Error resuming quiet-hours campaigns:", err.message);
+    reportError("job", "[Scheduler] Error resuming quiet-hours campaigns", err);
   }
 
   try {
@@ -96,17 +97,17 @@ async function schedulerTick({ campaignIds } = {}) {
       });
       if (count === 0) continue;
       processCampaign(c.id).catch((err) =>
-        console.error(`[Scheduler] Campaign ${c.id} failed:`, err.message)
+        reportError("job", `[Scheduler] Campaign ${c.id} failed`, err)
       );
     }
   } catch (err) {
-    console.error("[Scheduler] Error checking scheduled campaigns:", err.message);
+    reportError("job", "[Scheduler] Error checking scheduled campaigns", err);
   }
 }
 
 function startCampaignScheduler() {
   recoverInterruptedCampaigns().catch((err) =>
-    console.error("[Scheduler] Failed to recover running campaigns:", err.message)
+    reportError("job", "[Scheduler] Failed to recover running campaigns", err)
   );
 
   // Recovery needs no quiet-hours check of its own: processCampaign parks a

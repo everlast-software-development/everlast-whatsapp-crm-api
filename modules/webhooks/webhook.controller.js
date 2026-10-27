@@ -6,6 +6,7 @@ const { emitToNumber } = require("../../utils/socket");
 const numbers = require("../../utils/whatsappNumbers");
 const logAudit = require("../../utils/audit");
 const safeError = require("../../utils/safeError");
+const { logError } = require("../../utils/errorLog");
 const { applySuppressions, liftSuppression } = require("../../utils/optOutSuppression");
 const { attributeReply } = require("../../utils/campaignAttribution");
 const flowEngine = require("../../utils/flowEngine");
@@ -316,6 +317,14 @@ const handleOneStatus = async (statusEntry) => {
       (details ? ` — ${details}` : "") +
       (err.href ? ` [${err.href}]` : ""),
     );
+    logError({
+      source: "delivery",
+      code: err.code,
+      message: `Meta couldn't deliver a message: ${err.title || "failed"}${details && details !== err.title ? ` — ${details}` : ""}`,
+      details: { metaError: err, messageId: message.id, senderType: message.senderType },
+      conversationId: message.conversationId,
+      numberId: message.conversation.whatsappNumberId,
+    });
   } else {
     console.log(`Webhook: message ${whatsappMessageId} status → ${mapped}`);
   }
@@ -383,6 +392,7 @@ const receiveWhatsAppMessage = async (req, res) => {
     event = await prisma.webhookEvent.create({ data: { payload: req.body || {} } });
   } catch (err) {
     console.error("Webhook: could not save delivery — answering 500 so Meta re-sends it:", err.message);
+    logError({ source: "webhook", message: "Couldn't save an incoming WhatsApp webhook — Meta will re-send it", error: err });
     return res.sendStatus(500);
   }
   res.sendStatus(200);
@@ -489,6 +499,12 @@ const processChangePayload = async (body) => {
     if (!isRecognized) {
       const rawMsg = body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
       console.warn("Webhook: UNRECOGNIZED message type '" + rawType + "' — raw payload:", JSON.stringify(rawMsg));
+      logError({
+        source: "webhook",
+        code: rawType,
+        message: `A customer sent a message type the inbox doesn't show yet ("${rawType}")`,
+        details: { type: rawType, rawMessage: { ...rawMsg, from: undefined } },
+      });
     }
 
     // Deduplicate: if we already saved this WhatsApp message ID, skip it
@@ -714,6 +730,7 @@ const processChangePayload = async (body) => {
   } catch (err) {
     console.error("=== WEBHOOK PROCESSING ERROR ===");
     console.error(safeError(err));
+    logError({ source: "webhook", message: `Couldn't process an incoming WhatsApp message — it will be retried: ${err.message}`, error: err });
     // Re-thrown so the saved event stays unprocessed and recovery retries it.
     throw err;
   }

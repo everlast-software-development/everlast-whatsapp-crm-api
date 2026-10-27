@@ -1,6 +1,7 @@
 const crypto = require("crypto");
 const AppError = require("../utils/AppError");
 const safeError = require("../utils/safeError");
+const { logError } = require("../utils/errorLog");
 
 // Prisma connection-level failures. protect() now awaits a database read on
 // every request, so a database outage would otherwise surface as a wall of
@@ -56,6 +57,14 @@ const errorHandler = (err, req, res, next) => {
     // the raw error: an axios error's config holds the Meta access token.
     console.error(`[${requestId}] ${statusCode} ${req.method} ${req.originalUrl} — ${who}`);
     console.error(safeError(err));
+    // The path without its query (it can carry phone numbers or search text).
+    logError({
+      source: "api",
+      code: err.errorCode || err.code || statusCode,
+      message: `${statusCode} on ${req.method} ${req.originalUrl.split("?")[0]}: ${err.message}`,
+      error: err,
+      details: { requestId, user: req.user ? req.user.username : null },
+    });
   } else if (prismaMapped) {
     // Expected often enough to be noise as an error, but worth a trace.
     console.warn(`[${requestId}] ${statusCode} ${req.method} ${req.originalUrl} — ${who} — Prisma ${err.code}`);

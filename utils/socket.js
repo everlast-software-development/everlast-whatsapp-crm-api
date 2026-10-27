@@ -4,6 +4,7 @@ const prisma = require("../config/prisma");
 const numbers = require("./whatsappNumbers");
 const { mayUseNumber } = require("../middleware/whatsappNumber");
 const { roleHasPermission } = require("../config/permissions");
+const { reportError } = require("./errorLog");
 
 // Two rooms per line. `number:<id>` carries the inbox — messages, conversation
 // changes, notes — and is only joined with conversation:read.
@@ -119,7 +120,7 @@ const initSocket = (httpServer) => {
               await prisma.user.updateMany({ where: { id: userId, status: { not: "OFFLINE" } }, data: { status: "OFFLINE" } });
             }
           } catch (err) {
-            console.error("Socket: presence update failed:", err.message);
+            reportError("job", "Socket: presence update failed", err);
           }
         }, OFFLINE_GRACE_MS);
       }
@@ -156,7 +157,7 @@ function startPresenceSweep() {
   const run = () =>
     sweepPresence()
       .then((n) => n && console.log(`[Presence] marked ${n} user(s) offline (no open connection)`))
-      .catch((err) => console.error("[Presence] sweep failed:", err.message));
+      .catch((err) => reportError("job", "[Presence] sweep failed", err));
   setTimeout(run, Math.max(OFFLINE_GRACE_MS, 30 * 1000));
   setInterval(run, PRESENCE_SWEEP_MS).unref();
 }
@@ -179,7 +180,7 @@ const joinNumberRoom = async (socket, requestedId) => {
     socket.data.whatsappNumberId = number.id;
     return true;
   } catch (err) {
-    console.error("Socket: failed to join number room:", err.message);
+    reportError("job", "Socket: failed to join number room", err);
     return false;
   }
 };
@@ -231,7 +232,7 @@ const emitToNumberStaff = async (numberId, event, payload) => {
       }
     }
   } catch (err) {
-    console.error(`Socket: "${event}" staff alert failed:`, err.message);
+    reportError("job", `Socket: "${event}" staff alert failed`, err);
   }
 };
 

@@ -6,6 +6,7 @@ const { getApiVersion } = require("../utils/whatsappClient");
 const { emitGlobal, emitToNumber } = require("../utils/socket");
 const { qualityProblem } = require("../utils/campaignPreflight");
 const logAudit = require("../utils/audit");
+const { reportError, logError } = require("../utils/errorLog");
 
 // Watches each number's health at Meta: the quality rating (GREEN / YELLOW /
 // RED, driven by blocks and reports) and the account status (CONNECTED /
@@ -34,7 +35,7 @@ async function checkNumberQuality({ numberIds } = {}) {
       qualityRating = data.quality_rating || null;
       metaStatus = data.status || null;
     } catch (err) {
-      console.error(`[Quality] could not read "${number.label}":`, err.response?.data?.error?.message || err.message);
+      reportError("number", `[Quality] could not read "${number.label}"`, err);
       results.push({ numberId: number.id, error: true });
       continue;
     }
@@ -72,6 +73,12 @@ async function checkNumberQuality({ numberIds } = {}) {
     }
     if (worse) {
       console.warn(`[Quality] "${number.label}" is now ${qualityRating} / ${metaStatus} (was ${number.qualityRating} / ${number.metaStatus}) — ${paused} campaign(s) paused`);
+      logError({
+        source: "number",
+        code: qualityRating || metaStatus,
+        message: `"${number.label}" dropped to ${qualityRating} / ${metaStatus} on Meta (was ${number.qualityRating} / ${number.metaStatus}) — ${paused} campaign(s) paused`,
+        numberId: number.id,
+      });
       emitGlobal("number.quality_changed", {
         numberId: number.id,
         label: number.label,
@@ -96,10 +103,10 @@ async function checkNumberQuality({ numberIds } = {}) {
 
 function startNumberQualityWatch() {
   cron.schedule("*/30 * * * *", () => {
-    checkNumberQuality().catch((err) => console.error("[Quality] watch failed:", err.message));
+    checkNumberQuality().catch((err) => reportError("number", "[Quality] watch failed", err));
   });
   // Once at startup too, so the preflight has a rating to judge by.
-  checkNumberQuality().catch((err) => console.error("[Quality] first check failed:", err.message));
+  checkNumberQuality().catch((err) => reportError("number", "[Quality] first check failed", err));
   console.log("[Quality] number quality watch started (every 30 min)");
 }
 

@@ -13,6 +13,7 @@ const { roleHasPermission } = require("../../config/permissions");
 const { isQuietHours, nextSendWindowOpen, getQuietHoursConfig } = require("../../utils/quietHours");
 const { classifySendError } = require("../../utils/campaignSendErrors");
 const { assertCampaignSendable, checkCampaignSendable, isTemplateProblem } = require("../../utils/campaignPreflight");
+const { logError } = require("../../utils/errorLog");
 const { getCampaignCapacity } = require("../../utils/messagingCapacity");
 const { getSetting } = require("../../utils/appSettings");
 const { nameEquals, isRename, freeName, numbered } = require("../../utils/uniqueName");
@@ -153,6 +154,7 @@ async function runWithConcurrency(items, limit, getStopSignal, worker) {
         await worker(item);
       } catch (err) {
         console.error(`[Campaign] recipient ${item && item.id} — unexpected error:`, err.message);
+        logError({ source: "campaign", message: `Unexpected error while sending to a campaign recipient: ${err.message}`, error: err });
       }
     }
   }
@@ -284,6 +286,7 @@ async function runCampaign(campaignId) {
     credentials = await numbers.getCredentials(campaign.whatsappNumber);
   } catch (err) {
     console.error(`[Campaign ${campaignId}] cannot start:`, err.message);
+    logError({ source: "campaign", code: err.errorCode, message: `A campaign couldn't start: ${err.message}`, error: err, campaignId });
     const pauseReason =
       err.errorCode === "NUMBER_INACTIVE"
         ? "NUMBER_INACTIVE"
@@ -458,6 +461,7 @@ async function runCampaign(campaignId) {
         // Anything unexpected before the Meta call (a database error, a
         // conversation that can't be created). Never sent.
         console.error(`[Campaign ${campaignId}] recipient ${recipient.id} failed:`, err.message);
+        logError({ source: "campaign", message: `A campaign recipient failed before sending: ${err.message}`, error: err, campaignId });
         try {
           const { count } = await prisma.campaignRecipient.updateMany({
             where: { id: recipient.id, status: "SENDING" },
@@ -598,6 +602,15 @@ async function runCampaign(campaignId) {
     if (result.err) {
       const { err, verdict } = result;
       console.error(`[Campaign ${campaignId}] send to customer ${customer.id} failed (${verdict.kind}):`, err.response?.data || err.message);
+      const metaErr = err.response?.data?.error;
+      logError({
+        source: "campaign",
+        code: metaErr?.code ?? err.code,
+        message: `Meta refused a campaign message: ${metaErr?.error_data?.details || metaErr?.message || err.message}`,
+        error: err,
+        details: { verdict: verdict.kind },
+        campaignId,
+      });
       const attempts = (await prisma.campaignRecipient.findUnique({ where: { id: recipient.id }, select: { attempts: true } }))?.attempts ?? 1;
 
       switch (verdict.kind) {
@@ -722,6 +735,10 @@ async function runCampaign(campaignId) {
     });
     if (count === 0) return;
     console.error(`[Campaign ${campaignId}] paused (${pauseReason})${resumeAt ? ` until ${resumeAt.toISOString()}` : ""} — ${detail || ""}`);
+    // A person pausing it, or quiet hours, isn't an error.
+    if (!["MANUAL", "QUIET_HOURS"].includes(pauseReason)) {
+      logError({ source: "campaign", code: pauseReason, message: `A campaign was paused automatically: ${detail || pauseReason}`, campaignId, numberId });
+    }
     emitToNumber(numberId, "campaign.paused", { campaignId, reason: pauseReason, detail, resumesAt: resumeAt });
     logAudit({
       action: "CAMPAIGN_PAUSED",
@@ -819,6 +836,7 @@ async function runCampaign(campaignId) {
       return;
     }
     console.error(`[Campaign ${campaignId}] gave up after too many passes — left RUNNING for recovery`);
+    logError({ source: "campaign", message: "A campaign stopped making progress and was left for recovery to finish", campaignId });
   } finally {
     clearInterval(heartbeat);
     clearInterval(renewal);
@@ -1670,7 +1688,10 @@ const sendCampaignNow = async (req, res, next) => {
     });
 
     // Fire-and-forget
-    processCampaign(id).catch((err) => console.error(`[Campaign ${id}] Fatal error:`, err.message));
+    processCampaign(id).catch((err) => {
+      console.error(`[Campaign ${id}] Fatal error:`, err.message);
+      logError({ source: "campaign", message: `A campaign crashed while sending: ${err.message}`, error: err, campaignId: id });
+    });
 
     res.status(200).json({ success: true, message: `Campaign send started${deferNote()}` });
   } catch (err) {
@@ -1792,7 +1813,10 @@ const resumeCampaign = async (req, res, next) => {
 
     // processCampaign only ever touches recipients still PENDING, so resuming
     // is inherently safe — identical to the scheduler's crash-recovery resume.
-    processCampaign(id).catch((err) => console.error(`[Campaign ${id}] Fatal error:`, err.message));
+    processCampaign(id).catch((err) => {
+      console.error(`[Campaign ${id}] Fatal error:`, err.message);
+      logError({ source: "campaign", message: `A campaign crashed while sending: ${err.message}`, error: err, campaignId: id });
+    });
 
     logAudit({
       action: "CAMPAIGN_RESUMED",
@@ -1976,9 +2000,10 @@ const approveCampaign = async (req, res, next) => {
     });
 
     if (sendNow) {
-      processCampaign(id).catch((err) =>
-        console.error(`[Campaign ${id}] Fatal error:`, err.message)
-      );
+      processCampaign(id).catch((err) => {
+        console.error(`[Campaign ${id}] Fatal error:`, err.message);
+        logError({ source: "campaign", message: `A campaign crashed while sending: ${err.message}`, error: err, campaignId: id });
+      });
     }
 
     emitToNumber(campaign.whatsappNumberId, "campaign.approved", { campaignId: id });
@@ -2164,6 +2189,7 @@ const testSendTemplate = async (req, res, next) => {
       const metaMsg =
         waErr.response?.data?.error?.message || waErr.message || "Unknown error";
       console.error("[TestSend] WhatsApp send failed:", waErr.response?.data || waErr.message);
+      logError({ source: "send", code: waErr.response?.data?.error?.code, message: `A test send was refused: ${metaMsg}`, error: waErr });
       // The most common cause by far: an unapproved template can only go out
       // as an ad-hoc message, which Meta rejects outside an open 24h window.
       const hint = needsMetaTemplate

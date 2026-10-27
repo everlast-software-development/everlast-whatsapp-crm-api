@@ -17,6 +17,7 @@ const logAudit = require("./audit");
 // those decides whether campaigns can send it. Lives with the import mapping
 // (pure, no DB) so an imported template and a synced one agree.
 const { META_STATUS } = require("./templateImport");
+const { reportError, logError } = require("./errorLog");
 
 const getApiVersion = () => process.env.WHATSAPP_API_VERSION || "v19.0";
 const AUDIT_ACTION = {
@@ -43,6 +44,7 @@ async function pauseCampaignsUsing(template, status, reason) {
     });
     if (count === 0) continue;
     console.warn(`[Templates] campaign ${c.id} paused — ${detail}`);
+    logError({ source: "templates", message: `A campaign was paused because of its template: ${detail}`, campaignId: c.id });
     emitToNumber(c.whatsappNumberId, "campaign.paused", { campaignId: c.id, reason: "TEMPLATE_UNAVAILABLE", detail });
     logAudit({
       action: "CAMPAIGN_PAUSED",
@@ -147,6 +149,7 @@ async function syncLiveTemplates() {
       tokensByWaba.set(wabaId, await numbers.getTokenForWaba(wabaId));
     } catch (err) {
       console.error(`Live sync: no usable token for WABA ${wabaId} — ${err.message}`);
+      logError({ source: "templates", message: `Can't check templates on business account ${wabaId}: no working access token`, error: err });
     }
   }
   let changed = 0;
@@ -162,7 +165,7 @@ async function syncLiveTemplates() {
       if (await applyTemplateStatus(t, metaRes.data?.status, metaRes.data?.rejected_reason || null, "live-sync")) changed++;
       await applyTemplateCategory(t, metaRes.data?.category, "live-sync");
     } catch (err) {
-      console.error(`Live sync failed for template ${t.id} (WABA ${t.wabaId}):`, err.response?.data?.error?.message || err.message);
+      reportError("templates", `Live sync failed for template ${t.id} (WABA ${t.wabaId})`, err);
     }
   }
   return { checked: live.length, changed };
@@ -186,6 +189,7 @@ async function syncSubmittedTemplates() {
       tokensByWaba.set(wabaId, await numbers.getTokenForWaba(wabaId));
     } catch (err) {
       console.error(`Sync: no usable token for WABA ${wabaId} — ${err.message}`);
+      logError({ source: "templates", message: `Can't check templates on business account ${wabaId}: no working access token`, error: err });
     }
   }
 
@@ -206,7 +210,7 @@ async function syncSubmittedTemplates() {
       } catch (err) {
         // WABA included: without it, "sync silently does nothing for one
         // account" is impossible to diagnose from the logs.
-        console.error(`Sync failed for template ${t.id} (WABA ${t.wabaId}):`, err.message);
+        reportError("templates", `Sync failed for template ${t.id} (WABA ${t.wabaId})`, err);
       }
     }),
   );

@@ -67,4 +67,9 @@ process.on("SIGINT", () => shutdown("SIGINT"));
 
 process.on("unhandledRejection", (reason) => {
   console.error("Unhandled Promise Rejection:", require("./utils/safeError")(reason));
+  require("./utils/errorLog").logError({
+    source: "system",
+    message: `Unhandled error in the background: ${reason?.message || String(reason)}`,
+    error: reason instanceof Error ? reason : undefined,
+  });
 });

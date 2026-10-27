@@ -25,6 +25,7 @@ const { emitToNumber, emitToNumberStaff } = require("./socket");
 const { handedToTeam } = require("./followUp");
 const { isAssignable } = require("./conversationAssignment");
 const logAudit = require("./audit");
+const { logError } = require("./errorLog");
 const { nextNodeId, nodeById } = require("./flowGraph");
 const { buildTemplateSend } = require("./templateSend");
 const { parsePhoneNumberFromString } = require("libphonenumber-js");
@@ -295,6 +296,16 @@ async function finish(run, status, extra = {}) {
     where: { id: run.id },
     data: { status, currentNodeId: null, completedAt: new Date(), ...extra },
   });
+  // Every way a run can fail ends here, so the error log sees all of them.
+  if (status === "FAILED") {
+    logError({
+      source: "flow",
+      message: `A flow stopped with an error: ${extra.lastError || "unknown reason"}`,
+      details: { flowId: done.flowId, runId: done.id },
+      flowRunId: done.id,
+      conversationId: done.conversationId,
+    });
+  }
   return done;
 }
 
@@ -481,6 +492,7 @@ async function handOffOnAgentReply(conversationId) {
     await endActiveRuns(conversationId, "HANDED_OFF");
   } catch (err) {
     console.error("[flow] hand-off on agent reply failed:", err.message);
+    logError({ source: "flow", message: "Couldn't stop the flow after an agent replied", error: err, conversationId });
   }
 }
 
@@ -699,6 +711,7 @@ function handleInbound({ numberId, customer, conversation, inbound, campaignRepl
     () => ({ consumed }),
     (err) => {
       console.error("[flow] inbound handling failed (message kept):", err.message);
+      logError({ source: "flow", message: `A flow couldn't handle a customer's reply: ${err.message}`, error: err, conversationId: conversation?.id });
       // Unknown state: safer that nothing else answers this message.
       return { consumed: true };
     },
