@@ -134,7 +134,7 @@ const DEFAULT_RETRY = {
 // (FLOW_TYPING_PAUSE_MS overrides it, e.g. 0 in tests.)
 const TYPING_PAUSE_MS = Number(process.env.FLOW_TYPING_PAUSE_MS ?? 1200);
 
-async function sendBot(ctx, { kind, text, mediaType, mediaUrl, footer, header, buttons, list, prebuilt, carousel }) {
+async function sendBot(ctx, { kind, text, mediaType, mediaUrl, footer, header, buttons, link, list, prebuilt, carousel }) {
   const { conversation, customer, numberId } = ctx;
   const credentials = await numbers.getCredentials(numberId);
 
@@ -187,6 +187,22 @@ async function sendBot(ctx, { kind, text, mediaType, mediaUrl, footer, header, b
       content: text, messageType, footer,
       headerType: hasMedia ? mediaType : null, headerMediaUrl: hasMedia ? mediaUrl : null,
       buttons: buttons.map((b) => ({ id: b.waId, type: "QUICK_REPLY", title: b.title })),
+    };
+  } else if (link) {
+    // One "open link" button (cta_url); whatsappClient sends a lone URL button that way.
+    messageType = "INTERACTIVE";
+    const hasMedia = mediaType && mediaType !== "NONE";
+    const urlButton = { type: "URL", title: link.title, url: link.url };
+    content = JSON.stringify({
+      headerType: hasMedia ? mediaType : undefined,
+      headerMediaUrl: hasMedia ? mediaUrl : undefined,
+      body: text, footer,
+      buttons: [{ id: "link", ...urlButton }],
+    });
+    sendArgs = {
+      content: text, messageType, footer,
+      headerType: hasMedia ? mediaType : null, headerMediaUrl: hasMedia ? mediaUrl : null,
+      buttons: [urlButton],
     };
   } else if (mediaType && mediaType !== "NONE") {
     messageType = mediaType;
@@ -308,6 +324,8 @@ async function walk(ctx, run, graph, startNodeId) {
           mediaUrl: d.mediaUrl,
           footer: d.footer,
           buttons: hasButtons ? d.buttons.map((b) => ({ ...b, waId: replyId(run.id, node.id, b.id) })) : null,
+          // A link button sends nothing back, so the flow carries on below.
+          link: !hasButtons && d.link?.url ? d.link : null,
         });
         if (hasButtons) {
           return prisma.flowRun.update({ where: { id: run.id }, data: { currentNodeId: node.id, data } });

@@ -6,6 +6,7 @@
 // A node's outputs are "handles". An edge leaves a node from one handle:
 //   trigger   btn:<buttonId> per template quick-reply button, plus `any` (any other reply)
 //   message   btn:<buttonId> per button, or `next` when it has no buttons
+//             (a single link button counts as none: it sends nothing back)
 //   list      row:<rowId> per row
 //   carousel  card:<cardIndex>:<buttonId> per card quick reply, or `next` when
 //             the cards only have link buttons
@@ -168,9 +169,22 @@ function validateGraph(input) {
         for (const b of data.buttons) {
           if (b.title.length > LIMITS.buttonTitle) fail(`Button "${b.title}" is longer than ${LIMITS.buttonTitle} characters`, id);
         }
-        data.text = checkText("text", data.buttons.length ? LIMITS.body : LIMITS.text, data.mediaType === "NONE");
+        // A link button (WhatsApp's cta_url): one button that opens a URL, e.g.
+        // a single product page. It can't sit next to reply buttons, it needs
+        // text, and since tapping it sends nothing back the flow goes straight
+        // on through `next`.
+        if (d.link && typeof d.link === "object") {
+          const link = { title: str(d.link.title), url: str(d.link.url) };
+          if (data.buttons.length) fail("A link button can't be combined with reply buttons — use one or the other", id);
+          if (!link.title) fail("The link button needs a title", id);
+          if (link.title.length > LIMITS.buttonTitle) fail(`Link button "${link.title}" is longer than ${LIMITS.buttonTitle} characters`, id);
+          if (!/^https:\/\/\S+$/i.test(link.url)) fail("The link button needs a link starting with https://", id);
+          data.link = link;
+        }
+        const interactive = data.buttons.length > 0 || !!data.link;
+        data.text = checkText("text", interactive ? LIMITS.body : LIMITS.text, data.mediaType === "NONE" || !!data.link);
         data.footer = str(d.footer) || undefined;
-        if (data.footer && !data.buttons.length) data.footer = undefined; // footers only exist on interactive messages
+        if (data.footer && !interactive) data.footer = undefined; // footers only exist on interactive messages
         if ((data.footer || "").length > LIMITS.footer) fail(`Footer is longer than ${LIMITS.footer} characters`, id);
         data.variable = data.buttons.length ? checkVariable() : undefined;
         break;
