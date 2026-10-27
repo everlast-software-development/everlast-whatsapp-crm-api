@@ -113,10 +113,10 @@ const ROLE_PERMISSIONS = {
     // admin-only bottleneck on every send.
     "segment:read", "segment:write",
     "template:read", "template:write",
-    // No campaign:send: marketing builds campaigns and submits them; an admin
-    // approves (which sends or schedules) or rejects them with a reason.
-    // campaign:control stays — pausing or cancelling a send is always safe.
-    "campaign:read", "campaign:write", "campaign:control",
+    // Sending campaigns is this role's job, so campaign:send: marketing sends
+    // and schedules directly, without an admin's approval (and can approve or
+    // reject drafts others submit). campaign:control pauses and cancels.
+    "campaign:read", "campaign:write", "campaign:send", "campaign:control",
     "media:read", "media:write",
     "user:read", // agent names for reporting filters; user:write stays ADMIN
     // No audit:read — the audit log is ADMIN only. No stats:team — marketing

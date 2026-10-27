@@ -1870,7 +1870,7 @@ const submitCampaign = async (req, res, next) => {
     const id = parseInt(req.params.id);
     const campaign = await prisma.campaign.findFirst({
       where: { id, whatsappNumberId: req.numberId },
-      include: { template: true },
+      include: { template: true, whatsappNumber: true },
     });
     if (!campaign) return next(new AppError("Campaign not found", 404));
     if (campaign.status !== "DRAFT") {
@@ -1884,7 +1884,10 @@ const submitCampaign = async (req, res, next) => {
     // Re-checked here as well as at create time: updateCampaign can re-point a
     // DRAFT at a different template, Meta can pause one, and approval is the
     // send authorization.
-    assertCampaignSendable({ template: campaign.template, number: req.number });
+    // The campaign's own number row: req.number is a trimmed copy without
+    // isActive or the quality fields, so checking it reported every number as
+    // deactivated.
+    assertCampaignSendable({ template: campaign.template, number: campaign.whatsappNumber });
 
     const updated = await prisma.campaign.update({
       where: { id },
