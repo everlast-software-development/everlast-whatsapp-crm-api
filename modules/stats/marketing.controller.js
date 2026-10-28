@@ -58,9 +58,9 @@ const RECENT_REJECTION_DAYS = 14;
 // Line health asks Meta for each line's messaging tier (cached an hour in
 // utils/messagingCapacity.js). Never wait longer than this for it.
 const TIER_TIMEOUT_MS = 4000;
-// What the STOP keyword handler in modules/webhooks/webhook.controller.js
-// accepts as an opt-out.
-const STOP_WORDS = ["STOP", "STOPALL", "UNSUBSCRIBE"];
+// Opt-out messages, exactly as typed (utils/optOutKeywords.js recognises
+// more forms; this is only the tie-break for which campaign a STOP answered).
+const STOP_WORDS = require("../../utils/optOutKeywords").EXACT_OPT_OUT_WORDS;
 
 const toNum = (v) => (typeof v === "bigint" ? Number(v) : v ?? 0);
 // Share of `d`, one decimal, never above 100.

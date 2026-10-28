@@ -5,8 +5,11 @@ const { fetchAndStoreMediaWithRetry } = require("../../utils/whatsappMedia");
 const { emitToNumber } = require("../../utils/socket");
 const numbers = require("../../utils/whatsappNumbers");
 const logAudit = require("../../utils/audit");
+const { maskPhone } = logAudit;
 const safeError = require("../../utils/safeError");
 const { logError } = require("../../utils/errorLog");
+const { detectOptIntent, confirmationText } = require("../../utils/optOutKeywords");
+const { sendWhatsAppMessage } = require("../../utils/whatsappClient");
 const { applySuppressions, liftSuppression } = require("../../utils/optOutSuppression");
 const { attributeReply } = require("../../utils/campaignAttribution");
 const flowEngine = require("../../utils/flowEngine");
@@ -182,6 +185,22 @@ async function recordWhatsAppMarketingStop(customerId, whatsappNumberId, why) {
   });
 }
 
+// A WhatsApp "Stop promotions" (stop=true) or "resume" (stop=false) from a
+// phone that isn't a contact: kept in the phone-number suppression list that
+// applySuppressions() reads when the contact is created.
+async function rememberPhoneLineOptOut(phone, whatsappNumberId, stop) {
+  if (!stop) return liftSuppression(phone, { whatsappNumberId, sources: ["WHATSAPP"] });
+  const row = await prisma.optOutSuppression.findUnique({ where: { phone } });
+  const lines = (Array.isArray(row?.lines) ? row.lines : []).filter((l) => Number(l.whatsappNumberId) !== whatsappNumberId);
+  lines.push({ whatsappNumberId, source: "WHATSAPP", optedOutAt: new Date().toISOString() });
+  await prisma.optOutSuppression.upsert({
+    where: { phone },
+    update: { lines },
+    create: { phone, global: false, lines },
+  });
+  logAudit({ action: "PHONE_OPTED_OUT", actor: null, targetType: "Phone", targetId: 0, details: { source: "WHATSAPP", whatsappNumberId, phone: maskPhone(phone) } });
+}
+
 // field "user_preferences": value.user_preferences[] = { wa_id, category:
 // "marketing_messages", value: "stop" | "resume", detail, timestamp }.
 const handleUserPreferences = async (value) => {
@@ -191,7 +210,10 @@ const handleUserPreferences = async (value) => {
     if (pref.category !== "marketing_messages") continue;
     const customer = await prisma.customer.findUnique({ where: { phone: String(pref.wa_id) } });
     if (!customer) {
-      console.log(`Webhook: marketing preference "${pref.value}" for unknown contact — skipped`);
+      // Not a contact (yet): remember it by phone, so a later import or a first
+      // message from them comes with the opt-out already in place.
+      await rememberPhoneLineOptOut(String(pref.wa_id), number.id, pref.value === "stop");
+      console.log(`Webhook: marketing preference "${pref.value}" for a phone not in contacts — remembered`);
       continue;
     }
     if (pref.value === "stop") {
@@ -367,19 +389,37 @@ const handleReaction = async (value) => {
   });
 };
 
-// WhatsApp opt-out compliance: honor STOP/START style keywords from customers.
-// Deliberately not CANCEL / END / QUIT: at a clinic "Cancel" almost always
-// means an appointment, and treating it as an opt-out silently stopped every
-// future campaign to that patient. WhatsApp's own "Stop promotions" button is
-// handled separately (user_preferences / error 131050).
-const OPT_OUT_KEYWORDS = new Set(["STOP", "STOPALL", "UNSUBSCRIBE"]);
-const OPT_IN_KEYWORDS = new Set(["START", "UNSTOP", "SUBSCRIBE", "RESUME"]);
-const detectOptIntent = (content) => {
-  const word = (content || "").trim().toUpperCase();
-  if (OPT_OUT_KEYWORDS.has(word)) return "OUT";
-  if (OPT_IN_KEYWORDS.has(word)) return "IN";
-  return null;
-};
+// WhatsApp opt-out compliance: STOP / START style messages from customers, in
+// English and Arabic — see utils/optOutKeywords.js for the words and why
+// CANCEL / «إلغاء» alone are not among them. WhatsApp's own "Stop promotions"
+// switch is handled separately (user_preferences / error 131050).
+
+// Tells the patient their opt-out / opt-in was recorded. A plain message is
+// fine: they just wrote, so the 24-hour window is open. Never allowed to fail
+// the webhook — the opt-out itself is already saved.
+async function sendOptConfirmation({ number, conversation, customer, text }) {
+  let message;
+  try {
+    message = await prisma.message.create({
+      data: { conversationId: conversation.id, senderType: "BOT", senderId: null, content: text, messageType: "TEXT", status: "PENDING" },
+    });
+    const credentials = await numbers.getCredentials(number.id);
+    const { whatsappMessageId } = await sendWhatsAppMessage({ number: credentials, to: customer.phone, content: text, messageType: "TEXT" });
+    message = await prisma.message.update({ where: { id: message.id }, data: { whatsappMessageId, status: "SENT" } });
+    await prisma.conversation.update({
+      where: { id: conversation.id },
+      data: { lastMessage: text, lastMessageAt: new Date(), lastSenderType: "BOT" },
+    });
+  } catch (err) {
+    console.error("Webhook: opt-out confirmation not sent:", err.response?.data?.error?.message || err.message);
+    logError({ source: "send", code: err.response?.data?.error?.code, message: "Couldn't send the opt-out / opt-in confirmation to a patient (their choice is saved)", error: err, conversationId: conversation.id, numberId: number.id });
+    if (message) message = await prisma.message.update({ where: { id: message.id }, data: { status: "FAILED" } }).catch(() => message);
+  }
+  if (message) {
+    emitToNumber(number.id, "message.created", { message, conversationId: conversation.id });
+    emitToNumber(number.id, "conversation.updated", { conversationId: conversation.id });
+  }
+}
 
 // Save first, then answer, then handle. Meta never re-sends a delivery it got
 // a 200 for, so answering before the delivery is stored anywhere meant a crash
@@ -443,6 +483,22 @@ const processChangePayload = async (body) => {
       await handleUserPreferences(value);
       return;
     }
+    // Meta re-categorised a template (e.g. Utility → Marketing): recorded at
+    // once instead of at the next 30-minute sync.
+    if (change?.field === "template_category_update") {
+      await require("../../utils/templateStatus").handleTemplateCategoryWebhook(value);
+      return;
+    }
+    // A line's quality or messaging limit changed: re-read it from Meta now
+    // (pausing campaigns if it dropped) instead of waiting for the next check.
+    if (change?.field === "phone_number_quality_update") {
+      const digits = String(value?.display_phone_number || "").replace(/\D/g, "");
+      const line = (await numbers.getAll()).find((n) => String(n.displayPhoneNumber || "").replace(/\D/g, "") === digits);
+      if (line) await require("../../jobs/numberQualityWatch").checkNumberQuality({ numberIds: [line.id] });
+      return;
+    }
+    // Every other subscribed field (tracking_events, history, security…)
+    // carries no messages: it falls through and is skipped below.
 
     if (value?.statuses?.length) {
       await handleStatusUpdate(value);
@@ -539,39 +595,68 @@ const processChangePayload = async (body) => {
     // Consent is recorded against the number that received the keyword. A STOP
     // to the marketing line must not silence clinic appointment reminders.
     // (Customer.optedOut remains a separate, global do-not-contact switch.)
+    // Words and phrases (English and Arabic) live in utils/optOutKeywords.js.
+    // Template quick replies arrive as TEXT too, so WhatsApp's "Stop
+    // promotions" button on a marketing template is caught here as well.
     const optIntent = messageType === "TEXT" ? detectOptIntent(content) : null;
-    if (optIntent === "OUT") {
-      await prisma.customerOptOut.upsert({
-        where: { customerId_whatsappNumberId: { customerId: customer.id, whatsappNumberId: number.id } },
-        update: {},
-        create: { customerId: customer.id, whatsappNumberId: number.id, source: "KEYWORD" },
-      });
-      console.log("Webhook: customer", customer.id, "opted OUT of", number.label);
+    // Sent back once the change is recorded (see sendOptConfirmation below).
+    let optConfirmation = null;
+    const keyword = String(content || "").trim().slice(0, 30);
+    if (optIntent === "OUT" || optIntent === "OUT_ALL") {
+      // STOPALL: every line, marked KEYWORD_ALL so the patient's own START —
+      // on any line — can undo it. (Customer.optedOut stays the team's switch.)
+      const lineIds = optIntent === "OUT_ALL" ? (await numbers.getAll()).map((n) => n.id) : [number.id];
+      const source = optIntent === "OUT_ALL" ? "KEYWORD_ALL" : "KEYWORD";
+      for (const whatsappNumberId of lineIds) {
+        await prisma.customerOptOut.upsert({
+          where: { customerId_whatsappNumberId: { customerId: customer.id, whatsappNumberId } },
+          update: {},
+          create: { customerId: customer.id, whatsappNumberId, source },
+        });
+      }
+      console.log("Webhook: customer", customer.id, "opted OUT of", optIntent === "OUT_ALL" ? "every line" : number.label);
       logAudit({
         action: "CUSTOMER_OPTED_OUT",
         actor: null,
         targetType: "Customer",
         targetId: customer.id,
-        details: { source: "KEYWORD", scope: "line", whatsappNumberId: number.id, keyword: String(content || "").trim().slice(0, 30) },
+        details: { source, scope: optIntent === "OUT_ALL" ? "all" : "line", whatsappNumberId: number.id, keyword },
       });
+      optConfirmation = confirmationText(optIntent, content);
     } else if (optIntent === "IN") {
-      // START undoes only what the customer did themselves (a STOP keyword, or
-      // WhatsApp's own stop). An opt-out a person on the team recorded, or one
-      // that came in with an import, stays until the team lifts it.
+      // START undoes only what the customer did themselves: a STOP on this
+      // line, WhatsApp's own stop on this line, and a STOPALL on any line. An
+      // opt-out the team recorded, or one that came in with an import, stays
+      // until the team lifts it.
       const { count } = await prisma.customerOptOut.deleteMany({
-        where: { customerId: customer.id, whatsappNumberId: number.id, source: { in: ["KEYWORD", "WHATSAPP"] } },
+        where: {
+          customerId: customer.id,
+          OR: [
+            { whatsappNumberId: number.id, source: { in: ["KEYWORD", "WHATSAPP"] } },
+            { source: "KEYWORD_ALL" },
+          ],
+        },
       });
-      console.log("Webhook: customer", customer.id, count ? "opted IN to" : "sent START (no self opt-out to lift) on", number.label);
       await liftSuppression(phone, { whatsappNumberId: number.id, sources: ["KEYWORD", "WHATSAPP"] });
+      for (const n of await numbers.getAll({ includeInactive: true })) {
+        await liftSuppression(phone, { whatsappNumberId: n.id, sources: ["KEYWORD_ALL"] });
+      }
+      console.log("Webhook: customer", customer.id, count ? "opted IN to" : "sent START (no self opt-out to lift) on", number.label);
       if (count) {
         logAudit({
           action: "CUSTOMER_OPTED_IN",
           actor: null,
           targetType: "Customer",
           targetId: customer.id,
-          details: { source: "KEYWORD", scope: "line", whatsappNumberId: number.id },
+          details: { source: "KEYWORD", scope: "line", whatsappNumberId: number.id, keyword },
         });
       }
+      // Only promise "subscribed again" when it's true: a team or import
+      // opt-out (or the all-lines switch) still stops marketing here.
+      const stillOut = customer.optedOut || (await prisma.customerOptOut.count({
+        where: { customerId: customer.id, whatsappNumberId: number.id },
+      })) > 0;
+      if (!stillOut) optConfirmation = confirmationText("IN", content);
     }
 
     // Use upsert to avoid race condition when creating conversation
@@ -715,6 +800,8 @@ const processChangePayload = async (body) => {
     emitToNumber(number.id, "message.created", { message, conversationId: conversation.id });
     emitToNumber(number.id, "conversation.updated", { conversationId: conversation.id });
 
+    if (optConfirmation) await sendOptConfirmation({ number, conversation, customer, text: optConfirmation });
+
     // Campaign automation. After the message is saved and shown, so a flow
     // problem can never lose or delay the customer's message; handleInbound
     // catches its own errors.
@@ -724,7 +811,8 @@ const processChangePayload = async (body) => {
       conversation,
       inbound: { rawType, content, replyId, buttonPayload, whatsappMessageId },
       campaignReply,
-      optIntent,
+      // The flow engine only needs to know the patient opted out.
+      optIntent: optIntent === "OUT_ALL" ? "OUT" : optIntent,
     });
     console.log("Webhook: done ✓");
   } catch (err) {
