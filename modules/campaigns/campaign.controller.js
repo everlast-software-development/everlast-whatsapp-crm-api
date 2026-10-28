@@ -28,6 +28,28 @@ const { nameEquals, isRename, freeName, numbered } = require("../../utils/unique
 // starting; in-flight ones in the same batch are allowed to finish.
 const CAMPAIGN_SEND_CONCURRENCY = 5;
 
+// A campaign's own header file. Meta approves a media header's TYPE, not the
+// file (the link is sent again with every message), so a campaign may swap the
+// template's image for its own offer image. A template without a media header
+// can't gain one — that would be a different template. undefined = unchanged,
+// null = use the template's file.
+const MEDIA_HEADERS = ["IMAGE", "VIDEO", "DOCUMENT"];
+function campaignHeaderMedia(value, template) {
+  if (value === undefined) return undefined;
+  const url = String(value || "").trim();
+  if (!url) return null;
+  if (!MEDIA_HEADERS.includes(template.headerType)) {
+    throw new AppError("This template has no image, video or document header, so the campaign can't add one — Meta only sends the media type the template was approved with", 400);
+  }
+  if (!/^https?:\/\//i.test(url)) throw new AppError("The campaign's media needs a public https:// link", 400);
+  return url;
+}
+// The template as this campaign sends it.
+const templateForCampaign = (campaign) =>
+  campaign.headerMediaUrl && MEDIA_HEADERS.includes(campaign.template?.headerType)
+    ? { ...campaign.template, headerMediaUrl: campaign.headerMediaUrl }
+    : campaign.template;
+
 // Concurrency is capped per NUMBER, not per campaign, because Meta rate-limits
 // per phone number. Two campaigns approved on the same line would otherwise run
 // CAMPAIGN_SEND_CONCURRENCY lanes each and double the real send rate on that
@@ -579,7 +601,7 @@ async function runCampaign(campaignId) {
 
     // Shared with the test-send endpoint so a test proves something about
     // the real send. See utils/templateSend.js.
-    const { resolvedBody, templateContent, sendArgs } = buildTemplateSend(campaign.template, customer, null);
+    const { resolvedBody, templateContent, sendArgs } = buildTemplateSend(templateForCampaign(campaign), customer, null);
 
     // Linked to the recipient in the same write, so recovery can find (and
     // mark) the placeholder of a send that was interrupted.
@@ -1291,6 +1313,7 @@ const createCampaign = async (req, res, next) => {
     // "template name unknown" from Meta at send time.
     numbers.assertTemplateUsable(template, req.number);
     if (await campaignNameTaken(name)) return next(CAMPAIGN_NAME_TAKEN());
+    const headerMediaUrl = campaignHeaderMedia(req.body.headerMediaUrl, template) ?? null;
 
     // The audience is resolved against the SAME number the campaign will send
     // from, and that id is persisted below. If the two disagreed, the frozen
@@ -1320,6 +1343,7 @@ const createCampaign = async (req, res, next) => {
       data: {
         name,
         templateId: parseInt(templateId),
+        headerMediaUrl,
         flowId: flowId ?? null,
         category: category || "OTHER",
         whatsappNumberId: req.numberId,
@@ -1447,8 +1471,9 @@ const updateCampaign = async (req, res, next) => {
 
     // A new template gets the same checks as at creation: approved, active,
     // and on this number's business account.
-    if (templateId && parseInt(templateId) !== existing.templateId) {
-      const template = await prisma.template.findUnique({ where: { id: parseInt(templateId) } });
+    const templateChanged = templateId && parseInt(templateId) !== existing.templateId;
+    const template = await prisma.template.findUnique({ where: { id: templateChanged ? parseInt(templateId) : existing.templateId } });
+    if (templateChanged) {
       if (!template || !template.isActive) return next(new AppError("Template not found", 404));
       if (template.approvalStatus !== "APPROVED") return next(new AppError("Template must be APPROVED before it can be used in a campaign", 400));
       assertTemplateReady(template);
@@ -1464,6 +1489,10 @@ const updateCampaign = async (req, res, next) => {
     }
     if (category) data.category = category;
     if (templateId) data.templateId = parseInt(templateId);
+    const headerMediaUrl = campaignHeaderMedia(req.body.headerMediaUrl, template);
+    if (headerMediaUrl !== undefined) data.headerMediaUrl = headerMediaUrl;
+    // A new template without a media header can't keep the old campaign file.
+    else if (templateChanged && !MEDIA_HEADERS.includes(template.headerType)) data.headerMediaUrl = null;
     if (flowId !== undefined) data.flowId = flowId;
     if (scheduledAt !== undefined) data.scheduledAt = scheduledAt ? new Date(scheduledAt) : null;
     // Same rule as create: only an edit by someone who can authorize sends may
@@ -2176,8 +2205,10 @@ const testSendTemplate = async (req, res, next) => {
     }
 
     const sample = customer ?? { name: req.user.name || "Test Contact" };
+    // The campaign wizard's own media, so the test shows what the campaign sends.
+    const testMedia = campaignHeaderMedia(req.body.headerMediaUrl, template);
     const { sendArgs, needsMetaTemplate, resolvedBody } = buildTemplateSend(
-      template,
+      testMedia ? { ...template, headerMediaUrl: testMedia } : template,
       sample,
       req.user
     );

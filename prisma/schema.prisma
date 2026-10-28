@@ -546,6 +546,10 @@ model Campaign {
   name             String
   templateId       Int
   template         Template             @relation(fields: [templateId], references: [id])
+  // This campaign's own header image/video/document, sent instead of the
+  // template's. Meta approves a media header's type, not the file, so each
+  // campaign can show its own offer. Null = the template's file.
+  headerMediaUrl   String?
   // Business purpose, for filtering and reporting. Not the Meta billing
   // category — that lives on Template.
   category         CampaignCategory     @default(OTHER)

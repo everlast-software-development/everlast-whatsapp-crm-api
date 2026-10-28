@@ -162,7 +162,7 @@ function validateGraph(input) {
         data.mediaType = MEDIA_TYPES.includes(d.mediaType) ? d.mediaType : "NONE";
         data.mediaUrl = str(d.mediaUrl) || undefined;
         if (data.mediaType !== "NONE" && !/^https:\/\//i.test(data.mediaUrl || "")) {
-          fail("Media needs a public https:// link", id);
+          fail(`Add the ${data.mediaType.toLowerCase()} — choose, upload or import it`, id);
         }
         data.buttons = checkOptions(d.buttons, "button");
         if (data.buttons.length > LIMITS.buttons) fail(`WhatsApp allows at most ${LIMITS.buttons} buttons`, id);
@@ -236,7 +236,7 @@ function validateGraph(input) {
           seenCards.add(cid);
           const mediaType = c?.mediaType === "VIDEO" ? "VIDEO" : "IMAGE";
           const mediaUrl = str(c?.mediaUrl);
-          if (!/^https:\/\//i.test(mediaUrl)) fail(`Card ${n} needs its ${mediaType.toLowerCase()} (a public https:// link)`, id);
+          if (!/^https:\/\//i.test(mediaUrl)) fail(`Card ${n} needs its ${mediaType.toLowerCase()} — choose, upload or import it`, id);
           const body = str(c?.body);
           if (body.length > LIMITS.cardBody) fail(`Card ${n}'s text is ${body.length} characters — WhatsApp allows ${LIMITS.cardBody}`, id);
           if ((body.match(/\n/g) || []).length > 2) fail(`Card ${n}'s text can have at most 2 line breaks`, id);
