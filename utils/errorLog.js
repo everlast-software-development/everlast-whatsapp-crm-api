@@ -110,4 +110,4 @@ async function pruneErrorLog() {
   return count;
 }
 
-module.exports = { logError, pruneErrorLog };
+module.exports = { logError, reportError, pruneErrorLog };
