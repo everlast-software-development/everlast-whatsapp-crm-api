@@ -20,6 +20,7 @@ const {
   headerCharError,
   validateHeader,
   validateButtons,
+  groupButtons,
   validateCards,
 } = require("../../utils/templateValidation");
 const { templateNeedsSetup, assertTemplateReady, isMetaSampleUrl } = require("../../utils/templateSend");
@@ -33,6 +34,12 @@ const VALID_STATUSES = ["DRAFT", "SUBMITTED", "APPROVED", "REJECTED", "PAUSED", 
 const META_TEMPLATE_CATEGORY = { GENERAL: "UTILITY", RE_ENGAGEMENT: "MARKETING", CAMPAIGN: "MARKETING" };
 const BODY_MAX_LENGTH = 800; // kept in sync with the frontend's LIMITS.body
 const getApiVersion = () => process.env.WHATSAPP_API_VERSION || "v19.0";
+
+// Meta takes a Copy code button on marketing templates only.
+const copyCodeOnGeneral = (category, buttons) =>
+  category === "GENERAL" && Array.isArray(buttons) && buttons.some((b) => b.type === "COPY_CODE");
+const COPY_CODE_GENERAL = () =>
+  new AppError("A Copy code button is for offers — choose Campaign or Re-engagement as the category", 400);
 
 const toMetaName = (name) =>
   name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
@@ -163,6 +170,7 @@ const createTemplate = async (req, res, next) => {
     // footer or message-level buttons (Meta's rule for carousel templates).
     const headerFields = cards ? validateHeader("NONE") : validateHeader(headerType, header, headerMediaUrl);
     const validatedButtons = cards ? null : validateButtons(buttons);
+    if (copyCodeOnGeneral(category || "GENERAL", validatedButtons)) return next(COPY_CODE_GENERAL());
 
     const template = await prisma.template.create({
       data: {
@@ -225,6 +233,7 @@ const updateTemplate = async (req, res, next) => {
       ? validateHeader("NONE")
       : headerType !== undefined ? validateHeader(headerType, header, headerMediaUrl) : null;
     const validatedButtons = cards ? null : buttons !== undefined ? validateButtons(buttons) : existing.buttons;
+    if (copyCodeOnGeneral(category || existing.category, validatedButtons)) return next(COPY_CODE_GENERAL());
 
     const template = await prisma.template.update({
       where: { id },
@@ -409,14 +418,24 @@ const submitForApproval = async (req, res, next) => {
     if (template.buttons && Array.isArray(template.buttons) && template.buttons.length > 0) {
       components.push({
         type: "BUTTONS",
-        buttons: template.buttons.map((b) => {
+        // Same order as at send time (templateSend.js), so a button's index
+        // here is the index its send-time value is given for.
+        buttons: groupButtons(template.buttons).map((b) => {
           if (b.type === "PHONE_NUMBER") return { type: "PHONE_NUMBER", text: b.title, phone_number: b.phoneNumber };
+          if (b.type === "COPY_CODE") return { type: "COPY_CODE", example: b.code };
           if (b.type === "URL") {
-            const btn = { type: "URL", text: b.title, url: b.url };
-            if (PLACEHOLDER_RE.test(b.url)) {
-              btn.example = [b.url.replace(PLACEHOLDER_RE, "sample")];
+            // A personalised link: Meta wants its one variable as {{1}} at the
+            // end, plus a full sample URL.
+            const sample = buildTemplateParams(b.url, { name: "Sarah Ahmed" }, { name: "Alex" });
+            if (sample.length) {
+              return {
+                type: "URL",
+                text: b.title,
+                url: toMetaPositionalBody(b.url),
+                example: [b.url.replace(PLACEHOLDER_RE, encodeURIComponent(sample[0]))],
+              };
             }
-            return btn;
+            return { type: "URL", text: b.title, url: b.url };
           }
           return { type: "QUICK_REPLY", text: b.title };
         }),

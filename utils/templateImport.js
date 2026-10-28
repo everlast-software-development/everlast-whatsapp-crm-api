@@ -78,7 +78,6 @@ function positionalProblem(text, where, max) {
 
 const BUTTON_SKIP_REASONS = {
   OTP: "it has a one-time-password button (authentication) — the CRM can't send verification codes",
-  COPY_CODE: "it has a copy-code button — the CRM can't fill in a code",
   FLOW: "it has a WhatsApp Flow button — not supported in the CRM",
   CATALOG: "it has a catalog button — not supported in the CRM",
   MPM: "it's a multi-product (catalog) message — not supported in the CRM",
@@ -95,9 +94,15 @@ function mapButtons(metaButtons, idPrefix) {
     const id = `${idPrefix}${i}`;
     if (type === "QUICK_REPLY") out.push({ id, type, title: b.text });
     else if (type === "PHONE_NUMBER") out.push({ id, type, title: b.text, phoneNumber: b.phone_number });
+    else if (type === "COPY_CODE") {
+      // The code Meta was shown is the one the CRM sends.
+      const code = Array.isArray(b.example) ? b.example[0] : b.example;
+      out.push({ id, type, title: "Copy offer code", code: String(code || "") });
+    }
     else if (type === "URL") {
-      // A dynamic link needs its own value at send time, which the CRM
-      // doesn't model (see the TEMPLATE case in utils/whatsappClient.js).
+      // A link made in WhatsApp Manager ends in a positional {{1}} — nobody
+      // has said which patient detail fills it, so it can't be sent as is.
+      // (Links made in the CRM's editor name their variable.)
       if (/\{\{/.test(b.url || "")) return { reason: `its "${b.text}" button has a personalised link ({{1}} in the URL) — the CRM can't fill that in` };
       out.push({ id, type, title: b.text, url: b.url });
     } else return { reason: `it has a ${type ? type.toLowerCase().replace(/_/g, " ") : "unknown"} button — not supported in the CRM` };

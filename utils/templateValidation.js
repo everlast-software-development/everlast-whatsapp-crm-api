@@ -6,8 +6,9 @@ const AppError = require("./AppError");
 const { listPlaceholders, SUPPORTED_VARS } = require("./templateVars");
 
 const HEADER_TYPES = ["NONE", "TEXT", "IMAGE", "VIDEO", "DOCUMENT"];
-const BUTTON_TYPES = ["QUICK_REPLY", "URL", "PHONE_NUMBER"];
+const BUTTON_TYPES = ["QUICK_REPLY", "URL", "PHONE_NUMBER", "COPY_CODE"];
 const PLACEHOLDER_RE = /\{\{\s*[a-z0-9_]+\s*\}\}/gi;
+const HAS_PLACEHOLDER = new RegExp(PLACEHOLDER_RE.source, "i"); // non-global: .test() keeps no state
 
 // Meta rejects a text header containing newlines, emojis or WhatsApp
 // formatting characters. Placeholders are removed first — the underscore in
@@ -51,55 +52,83 @@ function validateHeader(headerType, header, headerMediaUrl) {
   return { headerType: type, header: null, headerMediaUrl: url };
 }
 
-// Validate buttons against WhatsApp's real rules: max 3 total, titles ≤25
-// chars with no placeholders, and Quick Reply buttons can't be mixed with
-// Call/URL buttons — it's one or the other, matching Meta's own constraint.
+// Meta's button rules (Cloud API template components):
+// - up to 10 buttons in all: Quick Reply ≤10, URL ≤2, Call Number ≤1, Copy
+//   code ≤1. WhatsApp shows two of them and folds the rest under "See all
+//   options" once there are more than three;
+// - Quick Reply and the other kinds can share a template, but the Quick
+//   Replies must sit together (QR, QR, URL — not QR, URL, QR);
+// - titles ≤25 characters, no placeholders; a URL may end with ONE
+//   placeholder ({{first_name}} etc.), filled in per patient at send time;
+// - a Copy code button has a fixed label and carries the code (≤15 letters
+//   or digits) the patient copies.
+const BUTTON_LIMITS = { total: 10, QUICK_REPLY: 10, URL: 2, PHONE_NUMBER: 1, COPY_CODE: 1 };
+const COPY_CODE_TITLE = "Copy offer code";
+const BUTTON_LABELS = { QUICK_REPLY: "Quick Reply", URL: "URL", PHONE_NUMBER: "Call Number", COPY_CODE: "Copy code" };
+
+// Keeps the Quick Replies together, in the order they were added, on the side
+// of whichever kind comes first — the order Meta accepts.
+const groupButtons = (buttons) => {
+  if (!buttons.length) return buttons;
+  const isQr = (b) => b.type === "QUICK_REPLY";
+  const qr = buttons.filter(isQr);
+  const other = buttons.filter((b) => !isQr(b));
+  return isQr(buttons[0]) ? [...qr, ...other] : [...other, ...qr];
+};
+
 const validateButtons = (buttons) => {
   if (!buttons) return null;
   if (!Array.isArray(buttons)) throw new AppError("buttons must be an array", 400);
   if (buttons.length === 0) return null;
-  if (buttons.length > 3) throw new AppError("Maximum 3 buttons allowed", 400);
+  if (buttons.length > BUTTON_LIMITS.total) throw new AppError(`Maximum ${BUTTON_LIMITS.total} buttons allowed`, 400);
 
-  const types = new Set();
-  let urlCount = 0;
-  let phoneCount = 0;
-
+  const counts = {};
   const cleaned = buttons.map((b) => {
-    const title = String(b?.title ?? "").trim();
-    if (!b?.id || !title) throw new AppError("Each button needs an id and a title", 400);
-    if (title.length > 25) throw new AppError(`Button title "${title}" exceeds 25 characters`, 400);
-    if (PLACEHOLDER_RE.test(title)) throw new AppError("Button titles can't contain placeholders", 400);
-
-    const type = b.type || "QUICK_REPLY";
+    const type = b?.type || "QUICK_REPLY";
     if (!BUTTON_TYPES.includes(type)) throw new AppError(`Invalid button type "${type}"`, 400);
-    types.add(type);
+    counts[type] = (counts[type] || 0) + 1;
+    if (counts[type] > BUTTON_LIMITS[type]) {
+      throw new AppError(`A template can have at most ${BUTTON_LIMITS[type]} ${BUTTON_LABELS[type]} button${BUTTON_LIMITS[type] > 1 ? "s" : ""}`, 400);
+    }
+    if (!b?.id) throw new AppError("Each button needs an id", 400);
+
+    if (type === "COPY_CODE") {
+      const code = String(b.code ?? "").trim();
+      if (!code) throw new AppError("A Copy code button needs the code to copy", 400);
+      if (!/^[A-Za-z0-9]{1,15}$/.test(code)) throw new AppError(`The offer code "${code}" must be 1–15 letters or digits, no spaces`, 400);
+      return { id: b.id, type, title: COPY_CODE_TITLE, code };
+    }
+
+    const title = String(b?.title ?? "").trim();
+    if (!title) throw new AppError("Each button needs a title", 400);
+    if (title.length > 25) throw new AppError(`Button title "${title}" exceeds 25 characters`, 400);
+    if (HAS_PLACEHOLDER.test(title)) throw new AppError("Button titles can't contain placeholders", 400);
 
     if (type === "PHONE_NUMBER") {
-      phoneCount++;
       const phoneNumber = String(b.phoneNumber ?? "").trim();
       if (!phoneNumber) throw new AppError("A phone number is required for a Call Number button", 400);
       if (!/^\+?[0-9]{7,15}$/.test(phoneNumber)) throw new AppError(`"${phoneNumber}" isn't a valid phone number`, 400);
       return { id: b.id, type, title, phoneNumber };
     }
     if (type === "URL") {
-      urlCount++;
       const url = String(b.url ?? "").trim();
       if (!url) throw new AppError("A URL is required for a URL button", 400);
       if (!/^https?:\/\//i.test(url)) throw new AppError("Button URL must start with http:// or https://", 400);
-      const placeholders = url.match(PLACEHOLDER_RE) || [];
-      if (placeholders.length > 1) throw new AppError("A URL button can have at most 1 placeholder", 400);
+      if (url.length > 2000) throw new AppError("A button URL can be at most 2000 characters", 400);
+      const vars = listPlaceholders(url);
+      if (vars.length > 1) throw new AppError("A URL button can have at most 1 placeholder", 400);
+      if (vars.length === 1) {
+        if (!SUPPORTED_VARS.includes(vars[0].toLowerCase())) {
+          throw new AppError(`Unknown placeholder {{${vars[0]}}} in "${title}". Use one of: ${SUPPORTED_VARS.join(", ")}`, 400);
+        }
+        if (!/\{\{[^{}]*\}\}$/.test(url)) throw new AppError(`The placeholder in "${title}"'s link must be at the very end of the URL (Meta's rule)`, 400);
+      }
       return { id: b.id, type, title, url };
     }
     return { id: b.id, type: "QUICK_REPLY", title };
   });
 
-  if (types.has("QUICK_REPLY") && types.size > 1) {
-    throw new AppError("Buttons can't mix Quick Reply with Call Number/URL buttons — use one or the other", 400);
-  }
-  if (phoneCount > 1) throw new AppError("Only 1 Call Number button is allowed per template", 400);
-  if (urlCount > 2) throw new AppError("A maximum of 2 URL buttons is allowed per template", 400);
-
-  return cleaned;
+  return groupButtons(cleaned);
 };
 
 // Carousel cards, validated against Meta's media-card carousel rules: 2–10
@@ -111,7 +140,6 @@ const validateButtons = (buttons) => {
 const CARD_MEDIA_TYPES = ["IMAGE", "VIDEO"];
 const CARD_BUTTON_TYPES = ["QUICK_REPLY", "URL"];
 const CARD_BODY_MAX = 160;
-const HAS_PLACEHOLDER = new RegExp(PLACEHOLDER_RE.source, "i"); // non-global: .test() keeps no state
 
 function validateCards(cards) {
   if (cards === undefined || cards === null) return null;
@@ -170,5 +198,8 @@ module.exports = {
   headerCharError,
   validateHeader,
   validateButtons,
+  groupButtons,
   validateCards,
+  BUTTON_LIMITS,
+  COPY_CODE_TITLE,
 };

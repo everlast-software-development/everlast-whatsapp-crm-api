@@ -35,6 +35,9 @@ const sendWhatsAppMessage = async ({
   language = "en_US",
   templateVariables = [],
   headerVariables = [],
+  // TEMPLATE: per-button values (a personalised link's ending, a Copy code
+  // button's code), already shaped as Meta's "button" components.
+  buttonParams = [],
   quotedWhatsappMessageId = null,
   // INTERACTIVE list message: { buttonLabel, rows: [{ id, title, description? }] }.
   // Takes precedence over `buttons`. Header may only be text on a list.
@@ -80,11 +83,13 @@ const sendWhatsAppMessage = async ({
       payload.document = { link: mediaUrl, caption: content || "", filename: content || "document" };
       break;
     case "INTERACTIVE": {
-      // WhatsApp's ad-hoc interactive message only supports two button shapes:
-      // up to 3 Quick Reply buttons, OR a single CTA URL button. A Call Number
-      // button, or a mix of CTA buttons, only renders as real tappable buttons
-      // inside an approved Meta TEMPLATE — for an immediate/ad-hoc send we
-      // degrade gracefully to plain text lines instead of dropping the info.
+      // WhatsApp's ad-hoc interactive message only supports these button
+      // shapes: up to 3 Quick Reply buttons (4–10 go out as a list the patient
+      // opens, like a template's "See all options"), OR a single CTA URL
+      // button. A Call Number or Copy code button, or a mix of kinds, only
+      // renders as real tappable buttons inside an approved Meta TEMPLATE — for
+      // an immediate/ad-hoc send we degrade gracefully to plain text lines
+      // instead of dropping the info.
       // Not named "list": that would hide the `list` parameter (a list message).
       const btns = buttons || [];
       const interactiveHeader = buildInteractiveHeader(headerType, header, headerMediaUrl);
@@ -127,6 +132,18 @@ const sendWhatsAppMessage = async ({
             }],
           },
         };
+      } else if (allQuickReply && btns.length > 3) {
+        payload.interactive = {
+          type: "list",
+          ...(headerType === "TEXT" && header && { header: { type: "text", text: header } }),
+          body: { text: content },
+          ...(footer && { footer: { text: footer } }),
+          action: {
+            button: "See all options",
+            // A list row's title is capped at 24 characters (a button's at 25).
+            sections: [{ rows: btns.slice(0, 10).map((b) => ({ id: b.id, title: b.title.slice(0, 24) })) }],
+          },
+        };
       } else if (allQuickReply) {
         payload.interactive = {
           type: "button",
@@ -145,7 +162,10 @@ const sendWhatsAppMessage = async ({
         };
       } else if (btns.length > 0) {
         const lines = btns.map((b) =>
-          b.type === "PHONE_NUMBER" ? `📞 ${b.title}: ${b.phoneNumber}` : b.type === "URL" ? `🔗 ${b.title}: ${b.url}` : `• ${b.title}`
+          b.type === "PHONE_NUMBER" ? `📞 ${b.title}: ${b.phoneNumber}`
+            : b.type === "URL" ? `🔗 ${b.title}: ${b.url}`
+            : b.type === "COPY_CODE" ? `🏷️ Offer code: ${b.code}`
+            : `• ${b.title}`
         );
         payload.type = "text";
         payload.text = { body: [content, "", ...lines].join("\n") };
@@ -172,12 +192,9 @@ const sendWhatsAppMessage = async ({
       if (templateVariables.length) {
         components.push({ type: "body", parameters: templateVariables.map((v) => ({ type: "text", text: v })) });
       }
-      // Static URL/Call/Quick-Reply buttons need no component override at
-      // send time — they're already baked into the approved template. A URL
-      // button with a dynamic {{1}} placeholder would need one, but that
-      // requires resolving the button's own variable (distinct from the body
-      // vars) which isn't modeled yet, so it's intentionally left as-is
-      // rather than guessing a value.
+      // Static URL/Call/Quick-Reply buttons are baked into the approved
+      // template; only a personalised link and a Copy code button take a value.
+      components.push(...buttonParams);
       if (carouselCards && carouselCards.length) {
         components.push({
           type: "carousel",

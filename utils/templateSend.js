@@ -8,6 +8,35 @@
 
 const AppError = require("./AppError");
 const { buildTemplateParams, resolveNamedVars } = require("./templateVars");
+const { groupButtons } = require("./templateValidation");
+
+// A personalised link ends with one placeholder ({{first_name}}…): the value
+// goes into the URL, so it is percent-encoded ("Sarah Ahmed" → Sarah%20Ahmed).
+const VAR_AT_END_RE = /\{\{\s*[a-z_]+\s*\}\}$/i;
+const linkValue = (url, customer, agent) =>
+  VAR_AT_END_RE.test(url || "") ? encodeURIComponent(buildTemplateParams(url, customer, agent)[0] ?? "") : null;
+
+// The buttons as this patient gets them — in the order Meta approved them
+// (Quick Replies grouped), links filled in — plus the per-button values an
+// approved template needs at send time: a personalised link's ending and a
+// Copy code button's code. Each value names its button by position.
+const buildButtons = (buttons, customer, agent) => {
+  const ordered = groupButtons(Array.isArray(buttons) ? buttons : []);
+  const resolved = ordered.map((b) => {
+    const value = b.type === "URL" ? linkValue(b.url, customer, agent) : null;
+    return value === null ? b : { ...b, url: b.url.replace(VAR_AT_END_RE, value) };
+  });
+  const params = [];
+  ordered.forEach((b, i) => {
+    if (b.type === "URL") {
+      const value = linkValue(b.url, customer, agent);
+      if (value !== null) params.push({ type: "button", sub_type: "url", index: String(i), parameters: [{ type: "text", text: value }] });
+    } else if (b.type === "COPY_CODE" && b.code) {
+      params.push({ type: "button", sub_type: "copy_code", index: String(i), parameters: [{ type: "coupon_code", coupon_code: b.code }] });
+    }
+  });
+  return { resolved, params };
+};
 
 // ── Is this template ready to send? ─────────────────────────────────────────
 //
@@ -83,6 +112,7 @@ const buildTemplateSend = (template, customer, agent = null, { cardPayload = def
 
   const hasButtons =
     template.buttons && Array.isArray(template.buttons) && template.buttons.length > 0;
+  const { resolved: buttons, params: buttonParams } = buildButtons(template.buttons, customer, agent);
 
   // A Meta-approved TEMPLATE send is the only shape that can open a new
   // conversation. Anything else goes out as an ad-hoc INTERACTIVE/TEXT
@@ -102,7 +132,7 @@ const buildTemplateSend = (template, customer, agent = null, { cardPayload = def
     headerMediaUrl: template.headerMediaUrl || undefined,
     body: resolvedBody,
     footer: template.footer || undefined,
-    buttons: hasButtons ? template.buttons : undefined,
+    buttons: hasButtons ? buttons : undefined,
     // Carousel: what the inbox renders as swipeable cards.
     cards: cards || undefined,
   });
@@ -126,7 +156,8 @@ const buildTemplateSend = (template, customer, agent = null, { cardPayload = def
     sendArgs: {
       content: resolvedBody,
       messageType,
-      buttons: hasButtons ? template.buttons : null,
+      buttons: hasButtons ? buttons : null,
+      buttonParams,
       headerType: template.headerType,
       header: resolvedHeader,
       headerMediaUrl: template.headerMediaUrl || null,
