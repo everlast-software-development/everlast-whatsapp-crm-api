@@ -47,6 +47,11 @@ const REMOVED = [
 const ENDPOINTS = [
   // audit
   ["GET", "/api/audit", "audit:read"],
+  // saved replies
+  ["GET", "/api/saved-replies", "saved_reply:read"],
+  ["POST", "/api/saved-replies", "saved_reply:write"],
+  ["PATCH", `/api/saved-replies/${NOPE}`, "saved_reply:write"],
+  ["DELETE", `/api/saved-replies/${NOPE}`, "saved_reply:write"],
   // campaigns
   ["GET", "/api/campaigns", "campaign:read"],
   ["GET", "/api/campaigns/active-progress", "campaign:read"],

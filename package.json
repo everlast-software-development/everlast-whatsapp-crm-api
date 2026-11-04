@@ -22,7 +22,8 @@
     "check:approval-settings": "node tests/approvalSettings.check.js",
     "check:webhooks": "node tests/webhooks.check.js",
     "check:supervision": "node tests/supervision.check.js",
-    "check:ownership": "node tests/ownership.check.js"
+    "check:ownership": "node tests/ownership.check.js",
+    "check:saved-replies": "node tests/savedReplies.check.js"
   },
   "keywords": [],
   "author": "",

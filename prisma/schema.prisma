@@ -292,6 +292,7 @@ model User {
   bookingsCreated   Booking[]          @relation("BookingsCreated")
   conversationNotes ConversationNote[] @relation("ConversationNotes")
   chatViews         ChatView[]
+  savedReplies      SavedReply[]
   bookingRequestsClaimed BookingRequest[] @relation("BookingRequestsClaimed")
   bookingRequestsHandled BookingRequest[] @relation("BookingRequestsHandled")
 }
@@ -902,6 +903,20 @@ model ChatView {
 
   @@unique([conversationId, userId])
   @@index([conversationId, lastSeenAt])
+}
+
+// Ready-made answers agents insert into a chat by typing "/" (Settings →
+// Saved replies). One shared list for every line; {name} in the body becomes
+// the patient's first name when inserted (filled in by the frontend).
+model SavedReply {
+  id          Int      @id @default(autoincrement())
+  shortcut    String   @unique
+  title       String
+  body        String
+  createdById Int?
+  createdBy   User?    @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 }
 
 // ── AI assistant ────────────────────────────────────────────────────────────

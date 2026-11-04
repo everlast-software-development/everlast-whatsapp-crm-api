@@ -47,6 +47,10 @@ const ALL_PERMISSIONS = [
   // it a person can still send GENERAL and Meta UTILITY templates (appointment
   // details, confirmations). ADMIN and SUPERVISOR; agents never send marketing.
   "template:send_marketing",
+  // Saved replies: the shared canned answers inserted with "/" in a chat.
+  // Everyone with an inbox reads them; ADMIN and SUPERVISOR keep the list.
+  "saved_reply:read",
+  "saved_reply:write",
   // Campaigns
   "campaign:read",
   "campaign:write",
@@ -137,6 +141,7 @@ const ROLE_PERMISSIONS = {
     "list:read",
     "segment:read",
     "template:read", "template:send_marketing",
+    "saved_reply:read", "saved_reply:write",
     "media:upload", "media:read",
     "number:read", "number:use_any",
     "team:supervise",
@@ -170,6 +175,8 @@ const ROLE_PERMISSIONS = {
     // conversation. Template *administration* is template:write. No
     // template:send_marketing: agents send GENERAL and UTILITY templates only.
     "template:read",
+    // Uses the shared saved replies; only admins and supervisors edit them.
+    "saved_reply:read",
     // No campaign permissions. The server supports an agent drafting a campaign
     // and submitting it for approval (the controller limits anyone with
     // campaign:write but not campaign:send to their own DRAFTs), but the
