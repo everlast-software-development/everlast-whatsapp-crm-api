@@ -10,6 +10,7 @@ const {
   getCustomerStats,
 } = require("./stats.controller");
 const { getMarketingStats } = require("./marketing.controller");
+const { getSpending } = require("./spending.controller");
 
 const router = express.Router();
 
@@ -26,5 +27,7 @@ router.get("/customers", getCustomerStats);
 // The Marketing dashboard. Takes ?from=&to=&numberId= like the supervisor
 // reports; the switcher header is ignored (numberId absent = all lines).
 router.get("/marketing", requirePermission("stats:marketing"), getMarketingStats);
+// WhatsApp spend per line for a month (?month=YYYY-MM): admins and directors.
+router.get("/spending", requirePermission("stats:spend"), getSpending);
 
 module.exports = router;

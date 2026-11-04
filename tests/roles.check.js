@@ -141,6 +141,7 @@ const ENDPOINTS = [
   ["GET", "/api/stats/agents", "stats:team"],
   // The Marketing dashboard. Without from/to it stops at 400 past the guard.
   ["GET", "/api/stats/marketing", "stats:marketing"],
+  ["GET", "/api/stats/spending", "stats:spend"],
   // team
   ["GET", "/api/users", "user:read"],
   // The agent picker's list — open to anyone who can assign, which includes

@@ -69,6 +69,9 @@ const ALL_PERMISSIONS = [
   // The Marketing dashboard (GET /api/stats/marketing): campaign funnel,
   // flows, audience, line health. ADMIN and MARKETING.
   "stats:marketing",
+  // What WhatsApp is costing (GET /api/stats/spending): messages Meta delivered,
+  // the free service allowance per line, estimated spend. ADMIN and DIRECTOR.
+  "stats:spend",
   "audit:read",
   // WhatsApp numbers. `number:read` lists them (every role needs it to render
   // the switcher). `number:use_any` is permission to act as any active number —
@@ -147,7 +150,7 @@ const ROLE_PERMISSIONS = {
   // and never on a team list; no conversation:assign, so no hand-overs.
   // user:read gives the names the report filters show.
   DIRECTOR: [
-    "stats:read", "stats:team", "stats:marketing",
+    "stats:read", "stats:team", "stats:marketing", "stats:spend",
     "team:supervise",
     "campaign:read",
     "user:read",
