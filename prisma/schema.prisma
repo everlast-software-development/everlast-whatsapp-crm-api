@@ -265,7 +265,8 @@ model OptOutSuppression {
 model User {
   id                    Int            @id @default(autoincrement())
   name                  String?
-  username              String         @unique @db.VarChar(20)
+  // Long enough for a full work email (kareem.moneim@everlastwellness.com).
+  username              String         @unique @db.VarChar(100)
   passwordHash          String
   role                  Role           @default(AGENT)
   // Account enabled/disabled. Distinct from `status`, which is presence

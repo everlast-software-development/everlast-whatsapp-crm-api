@@ -77,6 +77,9 @@ const getUserById = async (req, res, next) => {
 // Usernames are compared without regard to capitals or surrounding spaces:
 // "Mohamed" and "mohamed " are the same person at the sign-in box, and two
 // accounts that look alike are how the wrong one gets edited.
+// The username column is VARCHAR(100) (prisma/schema.prisma).
+const USERNAME_MAX = 100;
+const USERNAME_TOO_LONG = () => new AppError(`Username can be at most ${USERNAME_MAX} characters`, 400);
 const USERNAME_TAKEN = () => new AppError("This username is already in use", 409, "USERNAME_TAKEN");
 const usernameInUse = (username, exceptId) =>
   prisma.user.findFirst({
@@ -90,6 +93,7 @@ const createUser = async (req, res, next) => {
     const { name, password, role = "AGENT" } = req.body;
     const username = typeof req.body.username === "string" ? req.body.username.trim() : "";
     if (!username || !password) return next(new AppError("Username and password are required", 400));
+    if (username.length > USERNAME_MAX) return next(USERNAME_TOO_LONG());
     if (await usernameInUse(username)) return next(USERNAME_TAKEN());
     if (password.length < 8) return next(new AppError("Password must be at least 8 characters", 400));
     if (!ROLES.includes(role)) return next(roleError());
@@ -128,6 +132,7 @@ const updateUser = async (req, res, next) => {
     if (username !== undefined) {
       const clean = typeof username === "string" ? username.trim() : "";
       if (!clean) return next(new AppError("Username is required", 400));
+      if (clean.length > USERNAME_MAX) return next(USERNAME_TOO_LONG());
       if (await usernameInUse(clean, targetId)) return next(USERNAME_TAKEN());
       data.username = clean;
     }

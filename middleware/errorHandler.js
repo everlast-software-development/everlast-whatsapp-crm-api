@@ -13,6 +13,7 @@ const DB_UNAVAILABLE = new Set(["P1001", "P1002", "P1008", "P1017"]);
 // names tables, columns and file paths.
 const PRISMA_CLIENT_ERRORS = {
   P2025: [404, "Not found — it may have just been deleted"],
+  P2000: [400, "One of the values is too long"],
   P2002: [409, "That already exists"],
   P2003: [409, "It's still linked to something else, or something it points to no longer exists"],
 };
