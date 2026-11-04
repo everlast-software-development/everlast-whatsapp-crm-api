@@ -1236,9 +1236,24 @@ async function resolveAudience({ segmentId, recipientIds, audienceLists, whatsap
   }
 
   const listIds = readAudienceLists(audienceLists);
-  const ids = [
+  const picked = [
     ...new Set((Array.isArray(recipientIds) ? recipientIds : []).map((n) => parseInt(n)).filter(Number.isInteger)),
   ];
+  // Hand-picked contacts and lists get the same consent gates as a segment:
+  // an opted-out patient (do-not-contact, or a STOP on this line) never
+  // enters the audience. The send loop checks again at send time.
+  const reachable = picked.length
+    ? await prisma.customer.findMany({
+        where: {
+          id: { in: picked },
+          optedOut: false,
+          ...(whatsappNumberId ? { optOuts: { none: { whatsappNumberId } } } : {}),
+        },
+        select: { id: true },
+      })
+    : [];
+  const reachableSet = new Set(reachable.map((c) => c.id));
+  const ids = picked.filter((id) => reachableSet.has(id));
   const { lists, extraContacts } = await describeLists(listIds, ids);
   return {
     ids,
@@ -1249,6 +1264,8 @@ async function resolveAudience({ segmentId, recipientIds, audienceLists, whatsap
       extraContacts,
       resolvedAt: new Date().toISOString(),
       resolvedCount: ids.length,
+      // Picked but dropped as opted out (or no longer a contact).
+      excludedOptedOut: picked.length - ids.length,
     },
   };
 }

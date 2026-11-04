@@ -112,7 +112,15 @@ const getAllCustomers = async (req, res, next) => {
     const [customers, total] = await Promise.all([
       // id tiebreaker keeps pagination stable when many rows share a createdAt
       // (e.g. a bulk import), otherwise skip/take can repeat or drop rows.
-      prisma.customer.findMany({ where, orderBy: [{ createdAt: "desc" }, { id: "desc" }], skip, take: limit }),
+      // optOuts: the lines this contact sent STOP to (or was opted out of), so
+      // a picker can grey them out for the line it's working on.
+      prisma.customer.findMany({
+        where,
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        skip,
+        take: limit,
+        include: { optOuts: { select: { whatsappNumberId: true } } },
+      }),
       prisma.customer.count({ where }),
     ]);
 

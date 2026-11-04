@@ -809,9 +809,10 @@ const sendTemplate = async (req, res, next) => {
       return next(new AppError(`${template.category} templates must be APPROVED before sending`, 400));
     }
 
-    // Consent. A marketing template to a patient who opted out (on this line
-    // or everywhere) needs an explicit confirmation, and is audited. Utility
-    // templates (appointment details…) aren't marketing and go through.
+    // Consent. A patient who opted out (on this line or everywhere) never gets
+    // a marketing template — there is no override; lifting the opt-out (admins)
+    // is the only way back. Utility templates (appointment details…) aren't
+    // marketing and go through.
     const isMarketing = template.metaCategory ? template.metaCategory === "MARKETING" : template.category !== "GENERAL";
     // Agents send general and utility templates only — never marketing.
     if (isMarketing && !roleHasPermission(req.user.role, "template:send_marketing")) {
@@ -823,21 +824,12 @@ const sendTemplate = async (req, res, next) => {
         select: { id: true },
       });
       if (conversation.customer.optedOut || lineOptOut) {
-        if (req.body.confirmOptedOut !== true) {
-          return next(new AppError(
-            "This patient opted out of marketing messages. Send this offer anyway only if they asked for it.",
-            409,
-            "OPTED_OUT",
-            { scope: conversation.customer.optedOut ? "all" : "line" },
-          ));
-        }
-        logAudit({
-          action: "TEMPLATE_SENT_TO_OPTED_OUT",
-          actor: req.user,
-          targetType: "Customer",
-          targetId: conversation.customerId,
-          details: { templateId: template.id, templateName: template.name, conversationId: conversation.id },
-        });
+        return next(new AppError(
+          "This patient opted out of marketing messages, so marketing templates can't be sent to them.",
+          409,
+          "OPTED_OUT",
+          { scope: conversation.customer.optedOut ? "all" : "line" },
+        ));
       }
     }
 
