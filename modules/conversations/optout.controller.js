@@ -3,6 +3,7 @@ const AppError = require("../../utils/AppError");
 const logAudit = require("../../utils/audit");
 const { emitToNumber } = require("../../utils/socket");
 const { liftSuppression } = require("../../utils/optOutSuppression");
+const numbers = require("../../utils/whatsappNumbers");
 
 // Agents record a patient's opt-out from the chat (the patient said "don't
 // send me offers" on a call, in person, or in their own words). Two scopes:
@@ -33,9 +34,13 @@ async function optOutState(conversation) {
   return { line, all: Boolean(customer?.optedOut) };
 }
 
-const announce = (conversation) => {
+// "all" changes the patient's chats on every line, so every line hears it.
+const announce = async (conversation, scope) => {
   emitToNumber(conversation.whatsappNumberId, "conversation.updated", { conversationId: conversation.id });
-  emitToNumber(conversation.whatsappNumberId, "customer.opt_out_changed", { conversationId: conversation.id, customerId: conversation.customerId });
+  const lineIds = scope === "all" ? (await numbers.getAll()).map((n) => n.id) : [conversation.whatsappNumberId];
+  for (const id of lineIds) {
+    emitToNumber(id, "customer.opt_out_changed", { conversationId: conversation.id, customerId: conversation.customerId });
+  }
 };
 
 // ─── POST /api/conversations/:id/opt-out { scope: "line" | "all", reason? } ──
@@ -61,7 +66,7 @@ const optOut = async (req, res, next) => {
       targetId: conversation.customerId,
       details: { source: "MANUAL", scope, whatsappNumberId: conversation.whatsappNumberId, conversationId: conversation.id, reason },
     });
-    announce(conversation);
+    await announce(conversation, scope);
     res.status(200).json({ success: true, data: await optOutState(conversation) });
   } catch (err) {
     next(err);
@@ -100,7 +105,7 @@ const liftOptOut = async (req, res, next) => {
       targetId: conversation.customerId,
       details: { source: "MANUAL", scope, whatsappNumberId: conversation.whatsappNumberId, removed },
     });
-    announce(conversation);
+    await announce(conversation, scope);
     res.status(200).json({ success: true, data: await optOutState(conversation) });
   } catch (err) {
     next(err);

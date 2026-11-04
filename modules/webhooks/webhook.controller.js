@@ -224,6 +224,14 @@ async function recordWhatsAppMarketingStop(customerId, whatsappNumberId, why) {
   });
 }
 
+// Tells open chats on these lines that the customer's opt-out changed, so the
+// banner and template warnings update without a reload (the same event the
+// team's own opt-out controls send — see optout.controller.js). The page
+// matches it by customerId.
+const announceOptOutChange = (customerId, whatsappNumberIds) => {
+  for (const id of whatsappNumberIds) emitToNumber(id, "customer.opt_out_changed", { customerId });
+};
+
 // A WhatsApp "Stop promotions" (stop=true) or "resume" (stop=false) from a
 // phone that isn't a contact: kept in the phone-number suppression list that
 // applySuppressions() reads when the contact is created.
@@ -257,6 +265,7 @@ const handleUserPreferences = async (value) => {
     }
     if (pref.value === "stop") {
       await recordWhatsAppMarketingStop(customer.id, number.id, "user_preferences stop");
+      announceOptOutChange(customer.id, [number.id]);
     } else if (pref.value === "resume") {
       // Only lift WhatsApp's own opt-out; a STOP keyword or a manual opt-out stays.
       const { count } = await prisma.customerOptOut.deleteMany({
@@ -264,6 +273,7 @@ const handleUserPreferences = async (value) => {
       });
       await liftSuppression(customer.phone, { whatsappNumberId: number.id, sources: ["WHATSAPP"] });
       if (count) {
+        announceOptOutChange(customer.id, [number.id]);
         console.log(`Webhook: customer ${customer.id} resumed marketing via WhatsApp`);
         logAudit({
           action: "CUSTOMER_OPTED_IN",
@@ -642,6 +652,9 @@ const processChangePayload = async (body) => {
     const optIntent = messageType === "TEXT" ? detectOptIntent(content) : null;
     // Sent back once the change is recorded (see sendOptConfirmation below).
     let optConfirmation = null;
+    // Lines whose open chats must refresh their opt-out banner (announced once
+    // the message itself is on screen, below).
+    let optChangedLines = [];
     const keyword = String(content || "").trim().slice(0, 30);
     if (optIntent === "OUT" || optIntent === "OUT_ALL") {
       // STOPALL: every line, marked KEYWORD_ALL so the patient's own START —
@@ -664,6 +677,7 @@ const processChangePayload = async (body) => {
         details: { source, scope: optIntent === "OUT_ALL" ? "all" : "line", whatsappNumberId: number.id, keyword },
       });
       optConfirmation = confirmationText(optIntent, content);
+      optChangedLines = lineIds;
     } else if (optIntent === "IN") {
       // START undoes only what the customer did themselves: a STOP on this
       // line, WhatsApp's own stop on this line, and a STOPALL on any line. An
@@ -684,6 +698,8 @@ const processChangePayload = async (body) => {
       }
       console.log("Webhook: customer", customer.id, count ? "opted IN to" : "sent START (no self opt-out to lift) on", number.label);
       if (count) {
+        // START can lift a STOPALL, so every line's chats may change.
+        optChangedLines = (await numbers.getAll()).map((n) => n.id);
         logAudit({
           action: "CUSTOMER_OPTED_IN",
           actor: null,
@@ -840,6 +856,7 @@ const processChangePayload = async (body) => {
 
     emitToNumber(number.id, "message.created", { message, conversationId: conversation.id });
     emitToNumber(number.id, "conversation.updated", { conversationId: conversation.id });
+    announceOptOutChange(customer.id, optChangedLines);
 
     if (optConfirmation) await sendOptConfirmation({ number, conversation, customer, text: optConfirmation });
 
