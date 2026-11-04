@@ -1,6 +1,7 @@
 const prisma = require("../../config/prisma");
 const AppError = require("../../utils/AppError");
 const { RATES_USD, SERVICE_FREE_PER_MONTH, BILLING_TZ, countryOf, rateFor } = require("../../utils/whatsappPricing");
+const { serviceCountsByLine } = require("../../utils/metaUsage");
 
 // ─── GET /api/stats/spending?month=YYYY-MM ──────────────────────────────────
 // What WhatsApp is costing, per line, for one calendar month: every message we
@@ -15,6 +16,8 @@ const { RATES_USD, SERVICE_FREE_PER_MONTH, BILLING_TZ, countryOf, rateFor } = re
 //   rate — see the note in the loop on why Meta's flag isn't enough.
 // - A message Meta hasn't priced yet is estimated from its kind (a template
 //   whose category isn't known yet stays "not priced yet", never guessed).
+// - The free allowance uses Meta's own count (utils/metaUsage.js) when it is
+//   higher than ours: deleted messages still used it up.
 // Everything here is an estimate of Meta's invoice; WhatsApp Manager → Billing
 // is the authority.
 
@@ -72,7 +75,7 @@ const getSpending = async (req, res, next) => {
 
     const [lines, rows, awaitingDelivery] = await Promise.all([
       prisma.whatsAppNumber.findMany({
-        select: { id: true, label: true, displayPhoneNumber: true, isActive: true, isDefault: true },
+        select: { id: true, label: true, displayPhoneNumber: true, isActive: true, isDefault: true, wabaId: true, phoneNumberId: true, tokenEnvKey: true, appId: true },
         // The main (default) line first.
         orderBy: [{ isDefault: "desc" }, { id: "asc" }],
       }),
@@ -99,7 +102,29 @@ const getSpending = async (req, res, next) => {
     ]);
 
     const perLine = new Map(lines.map((l) => [l.id, emptyBucket()]));
-    const serviceUsed = new Map(); // line id → service messages counted so far (allowance)
+    // A service message that uses the allowance (not one opened from an ad).
+    const isAllowanceService = (m) =>
+      (m.pricingCategory || (m.messageType !== "TEMPLATE" ? "service" : null)) === "service" &&
+      !/entry_point/i.test(m.pricingType || "");
+    const ourService = new Map(); // line id → allowance service messages we still hold
+    for (const m of rows) {
+      if (!isAllowanceService(m)) continue;
+      const lineId = m.conversation?.whatsappNumberId;
+      ourService.set(lineId, (ourService.get(lineId) || 0) + 1);
+    }
+    // Meta's count can be higher (messages deleted here, or sent outside the
+    // app): those used the allowance first, so counting starts after them.
+    // Meta reports whole UTC days, so it is asked for the UTC calendar month —
+    // the Dubai month's start (20:00 UTC the day before) would pull in that
+    // whole day.
+    const metaService = await serviceCountsByLine(
+      lines,
+      new Date(Date.UTC(year, month0, 1)),
+      new Date(Date.UTC(month0 === 11 ? year + 1 : year, (month0 + 1) % 12, 1)),
+    );
+    const missing = (lineId) => Math.max(0, (metaService.get(lineId) ?? 0) - (ourService.get(lineId) || 0));
+    // line id → service messages counted so far (allowance)
+    const serviceUsed = new Map(lines.map((l) => [l.id, missing(l.id)]));
     const total = emptyBucket();
     const daily = new Map(); // day → { delivered, costUsd }
 
@@ -195,7 +220,10 @@ const getSpending = async (req, res, next) => {
         total: { ...shape(total), projectedUsd, awaitingDelivery },
         lines: [...perLine.entries()].map(([id, b]) => {
           const line = lines.find((l) => l.id === id);
-          const serviceDelivered = b.byCategory.service.delivered;
+          // The allowance: Meta's count when it has one and it's higher.
+          const ours = ourService.get(id) || 0;
+          const meta = metaService.get(id);
+          const serviceDelivered = meta != null ? Math.max(meta, ours) : ours;
           return {
             id,
             label: line?.label ?? "Removed line",
@@ -204,6 +232,8 @@ const getSpending = async (req, res, next) => {
             isDefault: line?.isDefault ?? false,
             freeServiceUsed: Math.min(serviceDelivered, SERVICE_FREE_PER_MONTH),
             freeServiceLeft: Math.max(0, SERVICE_FREE_PER_MONTH - serviceDelivered),
+            // "meta": WhatsApp's own count; "app": ours (Meta couldn't be read).
+            freeServiceSource: meta != null ? "meta" : "app",
             ...shape(b),
           };
         }),
