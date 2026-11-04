@@ -132,6 +132,9 @@ const getConversationMessages = async (req, res, next) => {
           // Which campaign this message answers, if any — drives the
           // "Reply to <campaign>" tag on the bubble.
           campaignRecipient: { select: { campaign: { select: { id: true, name: true } } } },
+          // Who on the team sent it, so every role can name them (supervisors
+          // and agents can't look a user up by id).
+          sender: { select: { id: true, name: true, username: true } },
           quotedMessage: {
             select: { id: true, content: true, messageType: true, senderType: true, mediaUrl: true, deletedAt: true },
           },
