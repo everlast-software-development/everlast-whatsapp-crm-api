@@ -7,7 +7,7 @@
 // one — which is the whole point of having a test send.
 
 const AppError = require("./AppError");
-const { buildTemplateParams, resolveNamedVars } = require("./templateVars");
+const { buildTemplateParams, resolveNamedVars, fillInsOf, FILL_INS } = require("./templateVars");
 const { groupButtons } = require("./templateValidation");
 
 // A personalised link ends with one placeholder ({{first_name}}…): the value
@@ -93,6 +93,10 @@ const assertTemplateReady = (template) => {
  * @param template a Template row
  * @param customer a Customer row (or any { name } shape, for a sample render)
  * @param agent    the acting user, for {{agent_name}} — null in campaigns
+ * @param opts.fields  what the agent typed for the template's fill-in blanks
+ *   ({ date, time, … } — see FILL_INS in templateVars.js). Every blank the
+ *   template uses must be given, so campaigns and flows (which have nobody
+ *   to type them) can never send such a template.
  * @param opts.cardPayload  (cardIndex, button) => the payload a carousel card's
  *   quick-reply tap reports back. Default "cb:<card>:<button id>", which is how
  *   a flow's Start step tells WHICH card was tapped (titles often repeat —
@@ -100,14 +104,23 @@ const assertTemplateReady = (template) => {
  */
 const defaultCardPayload = (i, b) => `cb:${i}:${b.id}`;
 
-const buildTemplateSend = (template, customer, agent = null, { cardPayload = defaultCardPayload } = {}) => {
+const buildTemplateSend = (template, customer, agent = null, { cardPayload = defaultCardPayload, fields = null } = {}) => {
   // Every send path builds its message here, so this one check covers the
   // inbox, campaigns, test sends and flows alike.
   assertTemplateReady(template);
-  const resolvedBody = resolveNamedVars(template.body, customer, agent);
+  const missing = fillInsOf(template).filter((k) => !String(fields?.[k] ?? "").trim());
+  if (missing.length) {
+    throw new AppError(
+      `Fill in ${missing.map((k) => FILL_INS[k].label.toLowerCase()).join(", ")} before sending "${template.name}"`,
+      400,
+      "TEMPLATE_FILL_INS_MISSING",
+      { missing },
+    );
+  }
+  const resolvedBody = resolveNamedVars(template.body, customer, agent, fields);
   const resolvedHeader =
     template.headerType === "TEXT" && template.header
-      ? resolveNamedVars(template.header, customer, agent)
+      ? resolveNamedVars(template.header, customer, agent, fields)
       : null;
 
   const hasButtons =
@@ -138,10 +151,10 @@ const buildTemplateSend = (template, customer, agent = null, { cardPayload = def
   });
 
   // Positional params matching the submitted Meta template (order of appearance).
-  const templateVariables = buildTemplateParams(template.body, customer, agent);
+  const templateVariables = buildTemplateParams(template.body, customer, agent, fields);
   // The header's own positional value (at most one), sent as a header component.
   const headerVariables =
-    template.headerType === "TEXT" && template.header ? buildTemplateParams(template.header, customer, agent) : [];
+    template.headerType === "TEXT" && template.header ? buildTemplateParams(template.header, customer, agent, fields) : [];
 
   return {
     resolvedBody,
@@ -179,4 +192,8 @@ const buildTemplateSend = (template, customer, agent = null, { cardPayload = def
   };
 };
 
-module.exports = { buildTemplateSend, templateNeedsSetup, assertTemplateReady, isMetaSampleUrl };
+// The blanks a template needs filled at send time, as { key, label } — for
+// the API's template list, so the chat's picker can ask for them.
+const fillInFields = (template) => fillInsOf(template).map((key) => ({ key, label: FILL_INS[key].label }));
+
+module.exports = { fillInFields, buildTemplateSend, templateNeedsSetup, assertTemplateReady, isMetaSampleUrl };

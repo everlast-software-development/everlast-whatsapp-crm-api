@@ -10,11 +10,11 @@ const { claimIfUnassigned } = require("../../utils/conversationAssignment");
 const { roleHasPermission } = require("../../config/permissions");
 const { handOffOnAgentReply } = require("../../utils/flowEngine");
 const { readClientMessageId, findDuplicateSend, isClientIdRace, assertMayReply } = require("../../utils/replyGuards");
-const { buildTemplateSend } = require("../../utils/templateSend");
+const { buildTemplateSend, fillInFields } = require("../../utils/templateSend");
 const { windowState, windowClosedError } = require("../../utils/messagingWindow");
 const { describeMetaTemplateError } = require("../../utils/metaErrors");
 const { syncSubmittedTemplates, applyTemplateStatus, applyTemplateCategory } = require("../../utils/templateStatus");
-const { toMetaPositionalBody, buildTemplateParams } = require("../../utils/templateVars");
+const { toMetaPositionalBody, buildTemplateParams, FILL_IN_SAMPLES } = require("../../utils/templateVars");
 const {
   PLACEHOLDER_RE,
   headerCharError,
@@ -27,17 +27,20 @@ const { templateNeedsSetup, assertTemplateReady, isMetaSampleUrl } = require("..
 const { mapMetaTemplate, chooseLanguageVersions, applyVariableMapping } = require("../../utils/templateImport");
 const { nameEquals, isRename, freeName, numbered } = require("../../utils/uniqueName");
 
-const VALID_CATEGORIES = ["GENERAL", "RE_ENGAGEMENT", "CAMPAIGN"];
+const VALID_CATEGORIES = ["GENERAL", "RE_ENGAGEMENT", "CAMPAIGN", "UTILITY"];
 const VALID_STATUSES = ["DRAFT", "SUBMITTED", "APPROVED", "REJECTED", "PAUSED", "DISABLED"];
 // Meta's own per-message billing category, mapped from this CRM's category —
 // kept in sync with the frontend's cost estimator (campaigns/new/page.tsx).
-const META_TEMPLATE_CATEGORY = { GENERAL: "UTILITY", RE_ENGAGEMENT: "MARKETING", CAMPAIGN: "MARKETING" };
+const META_TEMPLATE_CATEGORY = { GENERAL: "UTILITY", RE_ENGAGEMENT: "MARKETING", CAMPAIGN: "MARKETING", UTILITY: "UTILITY" };
+// Never marketing in this app: GENERAL (sent as a plain message) and UTILITY
+// (patient care). Meta's own category, once it has given one, wins.
+const NON_MARKETING = ["GENERAL", "UTILITY"];
 const BODY_MAX_LENGTH = 800; // kept in sync with the frontend's LIMITS.body
 const getApiVersion = () => process.env.WHATSAPP_API_VERSION || "v19.0";
 
 // Meta takes a Copy code button on marketing templates only.
 const copyCodeOnGeneral = (category, buttons) =>
-  category === "GENERAL" && Array.isArray(buttons) && buttons.some((b) => b.type === "COPY_CODE");
+  NON_MARKETING.includes(category) && Array.isArray(buttons) && buttons.some((b) => b.type === "COPY_CODE");
 const COPY_CODE_GENERAL = () =>
   new AppError("A Copy code button is for offers — choose Campaign or Re-engagement as the category", 400);
 
@@ -130,7 +133,8 @@ const getTemplates = async (req, res, next) => {
     // ("variables", "media") — computed, never stored, so it can't go stale.
     res.status(200).json({
       success: true,
-      data: templates.map((t) => ({ ...t, needsSetup: templateNeedsSetup(t) })),
+      // fillIns: blanks the agent types when sending (date, time…).
+      data: templates.map((t) => ({ ...t, needsSetup: templateNeedsSetup(t), fillIns: fillInFields(t) })),
     });
   } catch (err) {
     next(err);
@@ -157,7 +161,7 @@ const createTemplate = async (req, res, next) => {
     if (!name) return next(new AppError("name is required", 400));
     if (await templateNameTaken(req.number.wabaId, name)) return next(TEMPLATE_NAME_TAKEN());
     const cards = validateCards(req.body.cards);
-    if (cards && (category || "GENERAL") === "GENERAL") {
+    if (cards && NON_MARKETING.includes(category || "GENERAL")) {
       return next(new AppError("A carousel is a marketing template — choose Campaign or Re-engagement as the category", 400));
     }
     if (!body) return next(new AppError("body is required", 400));
@@ -226,7 +230,7 @@ const updateTemplate = async (req, res, next) => {
     const cards = req.body.cards !== undefined
       ? (Array.isArray(req.body.cards) && req.body.cards.length === 0 ? null : validateCards(req.body.cards))
       : existing.cards;
-    if (cards && (category || existing.category) === "GENERAL") {
+    if (cards && NON_MARKETING.includes(category || existing.category)) {
       return next(new AppError("A carousel is a marketing template — choose Campaign or Re-engagement as the category", 400));
     }
     const headerFields = cards
@@ -354,7 +358,7 @@ const submitForApproval = async (req, res, next) => {
       // Same named → positional conversion as the body. Header variables are
       // numbered on their own, so the header's one variable is always {{1}}.
       const headerComponent = { type: "HEADER", format: "TEXT", text: toMetaPositionalBody(template.header) };
-      const headerSample = buildTemplateParams(template.header, { name: "Sarah Ahmed" }, { name: "Alex" });
+      const headerSample = buildTemplateParams(template.header, { name: "Sarah Ahmed" }, { name: "Alex" }, FILL_IN_SAMPLES);
       if (headerSample.length > 0) headerComponent.example = { header_text: headerSample };
       components.push(headerComponent);
     } else if (["IMAGE", "VIDEO", "DOCUMENT"].includes(template.headerType) && template.headerMediaUrl) {
@@ -376,7 +380,7 @@ const submitForApproval = async (req, res, next) => {
     // appearance) and attach example values so Meta can validate on submit.
     const metaBody = toMetaPositionalBody(template.body);
     const bodyComponent = { type: "BODY", text: metaBody };
-    const sampleParams = buildTemplateParams(template.body, { name: "Sarah Ahmed" }, { name: "Alex" });
+    const sampleParams = buildTemplateParams(template.body, { name: "Sarah Ahmed" }, { name: "Alex" }, FILL_IN_SAMPLES);
     if (sampleParams.length > 0) {
       bodyComponent.example = { body_text: [sampleParams] };
     }
@@ -426,7 +430,7 @@ const submitForApproval = async (req, res, next) => {
           if (b.type === "URL") {
             // A personalised link: Meta wants its one variable as {{1}} at the
             // end, plus a full sample URL.
-            const sample = buildTemplateParams(b.url, { name: "Sarah Ahmed" }, { name: "Alex" });
+            const sample = buildTemplateParams(b.url, { name: "Sarah Ahmed" }, { name: "Alex" }, FILL_IN_SAMPLES);
             if (sample.length) {
               return {
                 type: "URL",
@@ -813,7 +817,7 @@ const sendTemplate = async (req, res, next) => {
     // a marketing template — there is no override; lifting the opt-out (admins)
     // is the only way back. Utility templates (appointment details…) aren't
     // marketing and go through.
-    const isMarketing = template.metaCategory ? template.metaCategory === "MARKETING" : template.category !== "GENERAL";
+    const isMarketing = template.metaCategory ? template.metaCategory === "MARKETING" : !NON_MARKETING.includes(template.category);
     // Agents send general and utility templates only — never marketing.
     if (isMarketing && !roleHasPermission(req.user.role, "template:send_marketing")) {
       return next(new AppError("Marketing templates can only be sent by a supervisor or an admin", 403, "MARKETING_NOT_ALLOWED"));
@@ -839,7 +843,9 @@ const sendTemplate = async (req, res, next) => {
     // which Meta rejects there. This replaced a rule that blocked re-engagement
     // templates INSIDE the window — though Meta accepts templates at any time —
     // and never checked any other template outside it.
-    if (!windowState(conversation.lastCustomerMessageAt).open && !buildTemplateSend(template, conversation.customer, req.user).needsMetaTemplate) {
+    // What the agent typed for the template's blanks ({ date, time, … }).
+    const fields = req.body.fields && typeof req.body.fields === "object" ? req.body.fields : null;
+    if (!windowState(conversation.lastCustomerMessageAt).open && !buildTemplateSend(template, conversation.customer, req.user, { fields }).needsMetaTemplate) {
       return next(windowClosedError(conversation.lastCustomerMessageAt));
     }
 
@@ -854,6 +860,7 @@ const sendTemplate = async (req, res, next) => {
       template,
       conversation.customer,
       req.user,
+      { fields },
     );
 
     let message = await prisma.message.create({

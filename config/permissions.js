@@ -43,6 +43,11 @@ const ALL_PERMISSIONS = [
   // Templates
   "template:read",
   "template:write",
+  // Patient-care (UTILITY) templates only, from the Patient messages page:
+  // create, edit, send to Meta for approval, delete. Never marketing — the
+  // server refuses offer wording (utils/marketingWords.js). SUPERVISOR; ADMIN
+  // has it through "*".
+  "template:write_utility",
   // Sending a MARKETING template (offers, re-engagement) inside a chat. Without
   // it a person can still send GENERAL and Meta UTILITY templates (appointment
   // details, confirmations). ADMIN and SUPERVISOR; agents never send marketing.
@@ -146,7 +151,7 @@ const ROLE_PERMISSIONS = {
     "contact:read", "contact:write",
     "list:read",
     "segment:read",
-    "template:read", "template:send_marketing",
+    "template:read", "template:send_marketing", "template:write_utility",
     "saved_reply:read", "saved_reply:write",
     "media:upload", "media:read",
     "number:read", "number:use_any",

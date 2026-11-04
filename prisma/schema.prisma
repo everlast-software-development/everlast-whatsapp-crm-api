@@ -71,6 +71,11 @@ enum TemplateCategory {
   GENERAL
   RE_ENGAGEMENT
   CAMPAIGN
+  // Patient-care messages (appointment details, results ready…) made by
+  // supervisors on the Patient messages page. Submitted to Meta as UTILITY and
+  // sent as a real template, so they reach a patient whose 24-hour window has
+  // closed. Never marketing: utils/marketingWords.js refuses offer wording.
+  UTILITY
 }
 
 // Why a campaign was sent. Separate from TemplateCategory, which is the message

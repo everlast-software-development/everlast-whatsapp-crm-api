@@ -14,6 +14,13 @@ const {
   setTemplateMedia,
   sendTemplate,
 } = require("./template.controller");
+const {
+  listUtilityTemplates,
+  createUtilityTemplate,
+  updateUtilityTemplate,
+  submitUtilityTemplate,
+  deleteUtilityTemplate,
+} = require("./utilityTemplate.controller");
 
 const router = express.Router();
 
@@ -23,6 +30,13 @@ const router = express.Router();
 router.use(protect, resolveNumber());
 
 router.get("/", requirePermission("template:read"), getTemplates);
+// Patient messages page: patient-care (UTILITY) templates only, for
+// supervisors. Before the /:id routes.
+router.get("/utility", requirePermission("template:write_utility"), listUtilityTemplates);
+router.post("/utility", requirePermission("template:write_utility"), createUtilityTemplate);
+router.put("/utility/:id", requirePermission("template:write_utility"), updateUtilityTemplate);
+router.post("/utility/:id/submit", requirePermission("template:write_utility"), submitUtilityTemplate);
+router.delete("/utility/:id", requirePermission("template:write_utility"), deleteUtilityTemplate);
 router.post("/sync", requirePermission("template:write"), syncApprovalStatus);
 // Pull templates made in WhatsApp Manager into the active line's WABA.
 router.post("/import", requirePermission("template:write"), importFromMeta);
