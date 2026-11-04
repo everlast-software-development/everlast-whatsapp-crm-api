@@ -114,12 +114,17 @@ const getAllCustomers = async (req, res, next) => {
       // (e.g. a bulk import), otherwise skip/take can repeat or drop rows.
       // optOuts: the lines this contact sent STOP to (or was opted out of), so
       // a picker can grey them out for the line it's working on.
+      // conversations: the lines they have a chat on — contacts are shared by
+      // every line, so the table says which number they messaged.
       prisma.customer.findMany({
         where,
         orderBy: [{ createdAt: "desc" }, { id: "desc" }],
         skip,
         take: limit,
-        include: { optOuts: { select: { whatsappNumberId: true } } },
+        include: {
+          optOuts: { select: { whatsappNumberId: true } },
+          conversations: { select: { whatsappNumberId: true } },
+        },
       }),
       prisma.customer.count({ where }),
     ]);
