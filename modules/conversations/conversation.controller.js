@@ -2,7 +2,7 @@ const prisma = require("../../config/prisma");
 const AppError = require("../../utils/AppError");
 const { emitToNumber } = require("../../utils/socket");
 const logAudit = require("../../utils/audit");
-const { ASSIGNEE_SELECT, isAssignable } = require("../../utils/conversationAssignment");
+const { ASSIGNEE_SELECT, isAssignable, assertMayAssign, assertMayChangeChat } = require("../../utils/conversationAssignment");
 const numbers = require("../../utils/whatsappNumbers");
 const { mayUseNumber } = require("../../middleware/whatsappNumber");
 const { windowState } = require("../../utils/messagingWindow");
@@ -406,7 +406,8 @@ const assignConversation = async (req, res, next) => {
       select: {
         whatsappNumberId: true,
         assignedAgentId: true,
-        assignedAgent: { select: ASSIGNEE_SELECT },
+        // status: a colleague's chat can only be taken over while they're away.
+        assignedAgent: { select: { ...ASSIGNEE_SELECT, status: true } },
       },
     });
     if (!existing || existing.whatsappNumberId !== req.numberId) {
@@ -457,6 +458,10 @@ const assignConversation = async (req, res, next) => {
       return next(changedUnderneath(existing.assignedAgent));
     }
 
+    // The owner (or a supervisor) decides. A colleague may only take it over
+    // for themselves while the owner is away, and only once confirmed.
+    const takeover = assertMayAssign(existing, req.user, targetId, { confirmTakeover: req.body.confirmTakeover === true });
+
     // Atomic: only if the owner is still the one just read. Two people
     // reassigning at the same moment — exactly one wins, the other is told.
     const { count } = await prisma.conversation.updateMany({
@@ -487,6 +492,8 @@ const assignConversation = async (req, res, next) => {
         agentUsername: conversation.assignedAgent?.username || null,
         previousAgentId: existing.assignedAgentId,
         previousAgentUsername: existing.assignedAgent?.username || null,
+        // Taken over from a colleague who was away (on a break / offline).
+        ...(takeover ? { takeover: true, previousAgentStatus: existing.assignedAgent?.status ?? null } : {}),
       },
     });
 
@@ -508,11 +515,13 @@ const changeConversationStatus = async (req, res, next) => {
 
     const owner = await prisma.conversation.findUnique({
       where: { id: conversationId },
-      select: { whatsappNumberId: true, status: true },
+      select: { whatsappNumberId: true, status: true, assignedAgentId: true, assignedAgent: { select: ASSIGNEE_SELECT } },
     });
     if (!owner || owner.whatsappNumberId !== req.numberId) {
       return next(new AppError("Conversation not found", 404));
     }
+    // Only the chat's owner (or a supervisor) closes or reopens it.
+    assertMayChangeChat(owner, req.user);
 
     const include = {
       customer: { select: { name: true, phone: true } },

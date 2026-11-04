@@ -317,9 +317,9 @@ const updateMyStatus = async (req, res, next) => {
       return next(new AppError("Status must be ONLINE, OFFLINE, or ON_BREAK", 400));
     }
     // Breaks and end-of-shift hand-overs are for people working the inbox in
-    // shifts; admins don't take a break from the queue.
-    if (status === "ON_BREAK" && req.user.role === "ADMIN") {
-      return next(new AppError("Admins don't have a break status", 400));
+    // shifts — the people who can own chats. Admins (and read-only roles) don't.
+    if (status === "ON_BREAK" && !canOwnChats(req.user.role)) {
+      return next(new AppError("Only people who work the inbox take breaks", 400));
     }
 
     const user = await prisma.user.update({
@@ -338,7 +338,7 @@ const updateMyStatus = async (req, res, next) => {
 // To a colleague (`toUserId`) or back to the shared queue (none given).
 const handOverMine = async (req, res, next) => {
   try {
-    if (req.user.role === "ADMIN") return next(new AppError("Admins don't hand over a queue — reassign chats from the inbox instead", 400));
+    if (!canOwnChats(req.user.role)) return next(new AppError("Only people who own chats hand over a queue — reassign chats from the inbox instead", 400));
     const result = await handOver(req.user.id, req.body?.toUserId ?? null, req.user, { reason: "end of shift" });
     res.status(200).json({ success: true, data: result });
   } catch (err) {

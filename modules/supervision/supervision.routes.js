@@ -1,7 +1,7 @@
 const express = require("express");
 const protect = require("../../middleware/auth");
 const requirePermission = require("../../middleware/permissions");
-const { getOverview, getConversations, getConversationTimeline, getActivity } = require("./supervision.controller");
+const { getOverview, getConversations, getConversationTimeline, getSeenBy, getActivity } = require("./supervision.controller");
 
 const router = express.Router();
 
@@ -12,6 +12,8 @@ router.use(protect, requirePermission("team:supervise"));
 router.get("/overview", getOverview);
 router.get("/conversations", getConversations);
 router.get("/conversations/:id", getConversationTimeline);
+// Who opened a colleague's chat (supervisors and admins only).
+router.get("/conversations/:id/seen-by", getSeenBy);
 router.get("/activity", getActivity);
 // Move one person's open chats to a colleague / the queue.
 // Acting on chats, not just watching: needs conversation:assign, so a

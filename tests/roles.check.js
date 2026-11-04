@@ -81,6 +81,7 @@ const ENDPOINTS = [
   ["GET", "/api/supervision/overview", "team:supervise"],
   ["GET", "/api/supervision/conversations", "team:supervise"],
   ["GET", `/api/supervision/conversations/${NOPE}`, "team:supervise"],
+  ["GET", `/api/supervision/conversations/${NOPE}/seen-by`, "team:supervise"],
   ["GET", "/api/supervision/activity", "team:supervise"],
   ["GET", "/api/supervision/report", "team:supervise"],
   ["GET", "/api/supervision/report/transcripts", "team:supervise"],

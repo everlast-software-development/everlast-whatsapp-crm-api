@@ -291,6 +291,7 @@ model User {
   outcomesSet       Conversation[]     @relation("ConversationOutcomes")
   bookingsCreated   Booking[]          @relation("BookingsCreated")
   conversationNotes ConversationNote[] @relation("ConversationNotes")
+  chatViews         ChatView[]
   bookingRequestsClaimed BookingRequest[] @relation("BookingRequestsClaimed")
   bookingRequestsHandled BookingRequest[] @relation("BookingRequestsHandled")
 }
@@ -430,6 +431,7 @@ model Conversation {
   bookings              Booking[]
   bookingRequests       BookingRequest[]
   notes                 ConversationNote[]
+  views                 ChatView[]
 
   // The composite unique is what `upsert` keys on in the webhook path, and what
   // permits a second conversation for the same customer on a different number.
@@ -882,6 +884,24 @@ model ConversationNote {
   createdAt      DateTime     @default(now())
 
   @@index([conversationId, createdAt])
+}
+
+// Someone opened a chat they don't own: one row per person per chat, for the
+// supervisor's "Seen by" list (utils/chatPresence.js). Never written for the
+// chat's owner, and only for chats that have one.
+model ChatView {
+  id             Int          @id @default(autoincrement())
+  conversationId Int
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  userId         Int
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  firstSeenAt    DateTime     @default(now())
+  lastSeenAt     DateTime     @default(now())
+  // Separate visits (opens at least VISIT_GAP_MS apart), not page reloads.
+  visits         Int          @default(1)
+
+  @@unique([conversationId, userId])
+  @@index([conversationId, lastSeenAt])
 }
 
 // ── AI assistant ────────────────────────────────────────────────────────────

@@ -3,6 +3,7 @@ const AppError = require("../../utils/AppError");
 const logAudit = require("../../utils/audit");
 const { emitToNumber } = require("../../utils/socket");
 const { roleHasPermission } = require("../../config/permissions");
+const { assertMayChangeChat } = require("../../utils/conversationAssignment");
 
 // The chat's outcome, set by the agent handling it, plus staff-only notes.
 // The only outcome left is "Follow up" (a date: the chat goes to the
@@ -23,9 +24,9 @@ const validDate = (v) => {
   return Number.isNaN(d.getTime()) ? null : d;
 };
 
-async function loadConversation(req) {
+async function loadConversation(req, include) {
   const id = parseInt(req.params.id);
-  const conversation = await prisma.conversation.findFirst({ where: { id, whatsappNumberId: req.numberId } });
+  const conversation = await prisma.conversation.findFirst({ where: { id, whatsappNumberId: req.numberId }, ...(include && { include }) });
   if (!conversation) throw new AppError("Conversation not found", 404);
   return conversation;
 }
@@ -42,7 +43,9 @@ const outcomeView = (c) => ({
 // { outcome: "FOLLOW_UP", followUpAt }   { outcome: null } clears it.
 const setOutcome = async (req, res, next) => {
   try {
-    const conversation = await loadConversation(req);
+    const conversation = await loadConversation(req, { assignedAgent: PERSON });
+    // The follow-up is the owner's to set (or a supervisor's).
+    assertMayChangeChat(conversation, req.user);
     const outcome = req.body.outcome ?? null;
     if (RETIRED_OUTCOMES.includes(outcome)) {
       return next(new AppError("That outcome is no longer used. Set a follow-up date, or clear the outcome", 400));

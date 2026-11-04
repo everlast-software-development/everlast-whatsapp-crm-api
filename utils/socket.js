@@ -5,6 +5,7 @@ const numbers = require("./whatsappNumbers");
 const { mayUseNumber } = require("../middleware/whatsappNumber");
 const { roleHasPermission } = require("../config/permissions");
 const { reportError } = require("./errorLog");
+const { chatRoom, recordView } = require("./chatPresence");
 
 // Two rooms per line. `number:<id>` carries the inbox — messages, conversation
 // changes, notes — and is only joined with conversation:read.
@@ -47,13 +48,13 @@ const initSocket = (httpServer) => {
       // lastActiveAt here would make "last active" meaningless.
       const user = await prisma.user.findUnique({
         where: { id: decoded.id },
-        select: { id: true, username: true, role: true, isActive: true, tokenVersion: true },
+        select: { id: true, username: true, name: true, role: true, isActive: true, tokenVersion: true },
       });
       if (!user || !user.isActive) return next(new Error("Unauthorized"));
       // Signed out by a password change or reset (see middleware/auth.js).
       if ((decoded.tv ?? 0) !== user.tokenVersion) return next(new Error("Unauthorized"));
 
-      socket.user = { id: user.id, username: user.username, role: user.role };
+      socket.user = { id: user.id, username: user.username, name: user.name, role: user.role };
       next();
     } catch {
       next(new Error("Unauthorized"));
@@ -97,6 +98,34 @@ const initSocket = (httpServer) => {
       socket.to(numberRoom(room)).emit("typing.stop", { conversationId, username });
     });
 
+    // Who has a chat open (utils/chatPresence.js). The browser says which chat
+    // it's showing; the socket holds a place in that chat's room while it does,
+    // and everyone there hears who else is. Checked against the socket's own
+    // line, so nobody can watch a chat on a line they aren't working.
+    socket.on("conversation.view", async (payload) => {
+      try {
+        const id = Number(payload?.conversationId);
+        const line = socket.data.whatsappNumberId;
+        if (!Number.isInteger(id) || !line || !canReadInbox(socket.user)) return;
+        const conversation = await prisma.conversation.findFirst({
+          where: { id, whatsappNumberId: line },
+          select: { id: true, assignedAgentId: true },
+        });
+        if (!conversation) return;
+        await leaveViewedChat(socket);
+        socket.join(chatRoom(id));
+        socket.data.viewingConversationId = id;
+        await broadcastViewers(id);
+        await recordView({ conversationId: id, ownerId: conversation.assignedAgentId, userId: socket.user.id });
+      } catch (err) {
+        reportError("job", "Socket: chat presence failed", err);
+      }
+    });
+    socket.on("conversation.leave", async (payload) => {
+      if (Number(payload?.conversationId) !== socket.data.viewingConversationId) return;
+      await leaveViewedChat(socket).catch((err) => reportError("job", "Socket: chat presence failed", err));
+    });
+
     // Using the app means being available: an agent the app marked offline
     // (browser closed) is online again when they come back. A break they set
     // themselves is left alone.
@@ -108,6 +137,9 @@ const initSocket = (httpServer) => {
 
     socket.on("disconnect", () => {
       console.log("Socket client disconnected:", socket.id);
+      // The socket has already left its rooms: tell the chat it was viewing.
+      const viewing = socket.data.viewingConversationId;
+      if (viewing) broadcastViewers(viewing).catch(() => {});
       // Closing the browser used to leave an agent "Online" forever (presence
       // only changed at login/logout). Once their last tab has been gone for
       // a short while — long enough to survive a page reload — they are offline.
@@ -184,6 +216,27 @@ const joinNumberRoom = async (socket, requestedId) => {
     return false;
   }
 };
+
+// Everyone with this chat open right now (one entry per person, however many
+// tabs), told to everyone in the chat's room. Each browser leaves itself out.
+async function broadcastViewers(conversationId) {
+  if (!io) return;
+  const sockets = await io.in(chatRoom(conversationId)).fetchSockets();
+  const people = new Map();
+  for (const s of sockets) {
+    const u = s.user;
+    if (u && !people.has(u.id)) people.set(u.id, { id: u.id, name: u.name || null, username: u.username });
+  }
+  io.to(chatRoom(conversationId)).emit("conversation.viewers", { conversationId, viewers: [...people.values()] });
+}
+
+async function leaveViewedChat(socket) {
+  const previous = socket.data.viewingConversationId;
+  if (!previous) return;
+  socket.leave(chatRoom(previous));
+  socket.data.viewingConversationId = null;
+  await broadcastViewers(previous);
+}
 
 const getIO = () => {
   if (!io) throw new Error("Socket.IO not initialized");

@@ -54,4 +54,74 @@ async function claimIfUnassigned({ conversationId, numberId, user }) {
   return true;
 }
 
-module.exports = { ASSIGNEE_SELECT, isAssignable, canOwnChats, claimIfUnassigned };
+// ── Who may change a chat ───────────────────────────────────────────────────
+// Everyone who works the inbox can read every chat on their line, but a chat's
+// owner decides what happens to it: its assignment, its follow-up and its
+// status. Team leads (team:supervise — supervisors and admins) may change any
+// chat; an unassigned chat is anyone's. The one way into a colleague's chat is
+// taking it over yourself while they're away (on a break or offline) — never
+// while they're online, and only once confirmed, so it can't happen by a
+// mis-click. Replying in a colleague's chat has its own confirm (replyGuards).
+
+const AppError = require("./AppError");
+
+const leadsTeam = (user) => roleHasPermission(user?.role, "team:supervise");
+const ownerName = (owner) => (owner ? owner.name || owner.username : "a colleague");
+
+/**
+ * Throws unless `user` may change this chat's follow-up or status.
+ * @param conversation needs assignedAgentId; assignedAgent ({ name, username }) for the message
+ */
+function assertMayChangeChat(conversation, user) {
+  const ownerId = conversation.assignedAgentId ?? null;
+  if (ownerId === null || ownerId === user.id || leadsTeam(user)) return;
+  throw new AppError(
+    `This chat belongs to ${ownerName(conversation.assignedAgent)}. Only they or a supervisor can change it — take the chat over first if they're away.`,
+    403,
+    "NOT_YOUR_CHAT",
+    { owner: conversation.assignedAgent ?? null },
+  );
+}
+
+/**
+ * Throws unless `user` may move this chat to `targetId` (null = unassign).
+ * Returns "takeover" when it's an allowed take-over of an away colleague's chat.
+ * @param conversation needs assignedAgentId and assignedAgent { id, name, username, status }
+ */
+function assertMayAssign(conversation, user, targetId, { confirmTakeover = false } = {}) {
+  const ownerId = conversation.assignedAgentId ?? null;
+  if (ownerId === null || ownerId === user.id || leadsTeam(user)) return null;
+
+  const owner = conversation.assignedAgent;
+  const who = ownerName(owner);
+  if (targetId !== user.id) {
+    throw new AppError(
+      `This chat belongs to ${who}. Only they or a supervisor can hand it to someone else.`,
+      403,
+      "NOT_YOUR_CHAT",
+      { owner: owner ?? null },
+    );
+  }
+  if (owner?.status === "ONLINE") {
+    throw new AppError(
+      `${who} is online — ask them to hand the chat over, or ask a supervisor.`,
+      403,
+      "OWNER_ONLINE",
+      { owner },
+    );
+  }
+  if (!confirmTakeover) {
+    throw new AppError(
+      `${who} is ${owner?.status === "ON_BREAK" ? "on a break" : "offline"}. Take this chat over?`,
+      409,
+      "TAKEOVER_CONFIRM",
+      { owner: owner ?? null },
+    );
+  }
+  return "takeover";
+}
+
+module.exports = {
+  ASSIGNEE_SELECT, isAssignable, canOwnChats, claimIfUnassigned,
+  leadsTeam, assertMayChangeChat, assertMayAssign,
+};

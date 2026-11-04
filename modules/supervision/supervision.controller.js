@@ -527,4 +527,26 @@ const getActivity = async (req, res, next) => {
   }
 };
 
-module.exports = { getOverview, getConversations, getConversationTimeline, getActivity, SLA_MINUTES, startOfLocalDay, responseTimes, messageText, _flowState: flowState };
+// ─── GET /api/supervision/conversations/:id/seen-by ─────────────────────────
+// Who opened this chat while it belonged to someone else (ChatView, written by
+// utils/chatPresence.js), latest first. For supervisors and admins only: agents
+// never see who looked at what.
+const getSeenBy = async (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (!Number.isInteger(id)) return next(new AppError("Conversation not found", 404));
+    const exists = await prisma.conversation.findUnique({ where: { id }, select: { id: true } });
+    if (!exists) return next(new AppError("Conversation not found", 404));
+    const views = await prisma.chatView.findMany({
+      where: { conversationId: id },
+      orderBy: { lastSeenAt: "desc" },
+      take: 50,
+      select: { firstSeenAt: true, lastSeenAt: true, visits: true, user: { select: { id: true, name: true, username: true, role: true } } },
+    });
+    res.status(200).json({ success: true, data: views });
+  } catch (err) {
+    next(err);
+  }
+};
+
+module.exports = { getOverview, getConversations, getConversationTimeline, getSeenBy, getActivity, SLA_MINUTES, startOfLocalDay, responseTimes, messageText, _flowState: flowState };
