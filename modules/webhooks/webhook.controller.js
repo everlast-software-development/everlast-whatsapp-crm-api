@@ -46,6 +46,43 @@ const MESSAGE_TYPE_MAP = {
   // "[unsupported: button]".
   button: "TEXT",
   sticker: "STICKER",
+  // A shared pin and a shared contact card carry no file — they're turned into
+  // readable text (see locationText / contactsText) so every list, preview and
+  // export shows them without special handling.
+  location: "TEXT",
+  contacts: "TEXT",
+};
+
+// Content saved for a message WhatsApp itself withheld (rawType "unsupported":
+// polls, view-once media, video notes, edited messages...). Meta sends no
+// content for these, so nothing can be recovered — the inbox shows a card
+// telling the agent to ask for it again. The frontend matches this prefix.
+const UNSUPPORTED_PREFIX = "[unsupported";
+// What the chat list shows for one, instead of the raw placeholder.
+const UNSUPPORTED_PREVIEW = "⚠️ Unsupported message";
+
+// "📍 Clinic name\nAddress\nhttps://www.google.com/maps?q=lat,lng" — the inbox
+// draws this as a location card (it matches the maps link on the last line).
+const locationText = (loc) => {
+  if (!loc) return null;
+  const lines = ["📍 " + (loc.name || "Shared location")];
+  if (loc.address) lines.push(loc.address);
+  if (loc.latitude != null && loc.longitude != null) {
+    lines.push(`https://www.google.com/maps?q=${loc.latitude},${loc.longitude}`);
+  }
+  return lines.join("\n");
+};
+
+// One line per shared contact: "👤 Name — +971..., +971...".
+const contactsText = (contacts) => {
+  if (!Array.isArray(contacts) || !contacts.length) return null;
+  return contacts
+    .map((c) => {
+      const name = c.name?.formatted_name || [c.name?.first_name, c.name?.last_name].filter(Boolean).join(" ") || "Contact";
+      const phones = (c.phones || []).map((p) => p.phone || p.wa_id).filter(Boolean);
+      return "👤 " + name + (phones.length ? " — " + phones.join(", ") : "");
+    })
+    .join("\n");
 };
 
 const extractFromPayload = (body) => {
@@ -95,6 +132,8 @@ const extractFromPayload = (body) => {
     msg.audio?.caption ||
     msg.document?.caption ||
     (rawType === "sticker" ? "[sticker]" : null) ||
+    (rawType === "location" ? locationText(msg.location) : null) ||
+    (rawType === "contacts" ? contactsText(msg.contacts) : null) ||
     // Diagnostic placeholder: if we couldn't map the type AND there's no media
     // to download, record what the type actually was instead of a generic label.
     (mediaId || mappedType ? "[media message]" : `[unsupported: ${rawType || "unknown"}]`);
@@ -552,7 +591,9 @@ const processChangePayload = async (body) => {
     // raw message so we can see its exact shape and add proper handling. This is
     // what makes an "[unsupported: ...]" / uncaptured-media case debuggable —
     // the payload is otherwise not stored anywhere.
-    if (!isRecognized) {
+    // "unsupported" is skipped: that's WhatsApp withholding the message, so
+    // there's nothing for us to add handling for.
+    if (!isRecognized && rawType !== "unsupported") {
       const rawMsg = body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
       console.warn("Webhook: UNRECOGNIZED message type '" + rawType + "' — raw payload:", JSON.stringify(rawMsg));
       logError({
@@ -750,7 +791,7 @@ const processChangePayload = async (body) => {
       where: { id: conversation.id },
       data: {
         unreadCount: { increment: 1 },
-        lastMessage: content,
+        lastMessage: content.startsWith(UNSUPPORTED_PREFIX) ? UNSUPPORTED_PREVIEW : content,
         lastMessageAt: new Date(),
         lastSenderType: "CUSTOMER",
         lastCustomerMessageAt: new Date(),
