@@ -93,6 +93,26 @@ const listFlows = async (req, res, next) => {
   }
 };
 
+// Names of the templates and agents a flow's steps point at, so a role that
+// can't list templates or agents (a director) still reads which template the
+// campaign sends and who a patient is handed to, not an empty picker.
+async function namesOf(graph) {
+  const templateIds = new Set();
+  const userIds = new Set();
+  for (const n of graph?.nodes || []) {
+    if (Number.isInteger(n.data?.templateId)) templateIds.add(n.data.templateId);
+    if (Number.isInteger(n.data?.agentId)) userIds.add(n.data.agentId);
+  }
+  const [templates, users] = await Promise.all([
+    templateIds.size ? prisma.template.findMany({ where: { id: { in: [...templateIds] } }, select: { id: true, name: true } }) : [],
+    userIds.size ? prisma.user.findMany({ where: { id: { in: [...userIds] } }, select: { id: true, name: true, username: true } }) : [],
+  ]);
+  return {
+    templates: Object.fromEntries(templates.map((t) => [t.id, t.name])),
+    users: Object.fromEntries(users.map((u) => [u.id, u.name || u.username])),
+  };
+}
+
 // ─── GET /api/campaigns/flows/:id ────────────────────────────────────────────
 const getFlow = async (req, res, next) => {
   try {
@@ -106,8 +126,8 @@ const getFlow = async (req, res, next) => {
       },
     });
     if (!flow) return next(new AppError("Flow not found", 404));
-    const stats = await runStats([id]);
-    res.json({ success: true, data: { ...flow, variables: variablesOf(flow.graph), runs: stats[id] || { total: 0 } } });
+    const [stats, names] = await Promise.all([runStats([id]), namesOf(flow.graph)]);
+    res.json({ success: true, data: { ...flow, variables: variablesOf(flow.graph), names, runs: stats[id] || { total: 0 } } });
   } catch (err) {
     next(err);
   }

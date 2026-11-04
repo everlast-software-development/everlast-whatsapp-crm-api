@@ -56,6 +56,11 @@ const ALL_PERMISSIONS = [
   "campaign:write",
   "campaign:send",
   "campaign:control",
+  // How patients went through a flow: the Responses tab and its run list
+  // (GET /api/campaigns/flows/:id/runs) and the run counts. Without it a
+  // campaign:read role sees only the flow itself, as a read-only tree.
+  // ADMIN, MARKETING and SUPERVISOR; not DIRECTOR.
+  "flow:results",
   // Media
   "media:upload",
   "media:read",
@@ -124,6 +129,7 @@ const ROLE_PERMISSIONS = {
     // and schedules directly, without an admin's approval (and can approve or
     // reject drafts others submit). campaign:control pauses and cancels.
     "campaign:read", "campaign:write", "campaign:send", "campaign:control",
+    "flow:results",
     "media:read", "media:write",
     "user:read", // agent names for reporting filters; user:write stays ADMIN
     // No audit:read — the audit log is ADMIN only. No stats:team — marketing
@@ -145,13 +151,14 @@ const ROLE_PERMISSIONS = {
     "media:upload", "media:read",
     "number:read", "number:use_any",
     "team:supervise",
-    "campaign:read",
+    "campaign:read", "flow:results",
     "stats:read", "stats:team",
   ],
 
   // Leadership (a director): follows how the clinic is doing without working
-  // in it. Every dashboard and report, the Supervision page and campaign /
-  // flow results — all read-only. No conversation:write, so never assignable
+  // in it. Every dashboard and report, the Supervision page and campaign
+  // results — all read-only. Flows show as a read-only tree of steps, without
+  // how patients went through them (no flow:results). No conversation:write, so never assignable
   // and never on a team list; no conversation:assign, so no hand-overs.
   // user:read gives the names the report filters show.
   DIRECTOR: [

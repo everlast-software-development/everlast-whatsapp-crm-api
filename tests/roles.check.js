@@ -55,6 +55,11 @@ const ENDPOINTS = [
   // campaigns
   ["GET", "/api/campaigns", "campaign:read"],
   ["GET", "/api/campaigns/active-progress", "campaign:read"],
+  // Flows: the steps for every campaign reader, how patients went through them
+  // only with flow:results (the Director sees the tree, not the runs).
+  ["GET", "/api/campaigns/flows", "campaign:read"],
+  ["GET", `/api/campaigns/flows/${NOPE}`, "campaign:read"],
+  ["GET", `/api/campaigns/flows/${NOPE}/runs`, "flow:results"],
   ["GET", `/api/campaigns/${NOPE}`, "campaign:read"],
   ["GET", `/api/campaigns/${NOPE}/replies`, "campaign:read"],
   ["POST", "/api/campaigns", "campaign:write"],
