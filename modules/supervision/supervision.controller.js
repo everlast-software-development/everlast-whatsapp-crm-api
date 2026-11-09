@@ -98,7 +98,10 @@ const getOverview = async (req, res, next) => {
     const today = startOfLocalDay(now);
     const where = numberFilter(req);
 
-    const [waitingChats, followUpsDue, flowRunsToday, agents, assignedOpen, repliesToday, responses] = await Promise.all([
+    // Waits from the last week, so a patient who wrote last night (quiet
+    // hours) and was answered this morning counts as answered today.
+    const weekAgo = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
+    const [waitingChats, followUpsDue, flowRunsToday, agents, assignedOpen, repliesToday, recentResponses, unreadChats] = await Promise.all([
       prisma.conversation.findMany({
         where: { ...where, awaitingReplySince: { not: null }, status: { not: "RESOLVED" } },
         select: { id: true, customerId: true, awaitingReplySince: true, assignedAgentId: true },
@@ -128,8 +131,20 @@ const getOverview = async (req, res, next) => {
         _count: { _all: true },
         _max: { createdAt: true },
       }),
-      responseTimes(today, where),
+      responseTimes(weekAgo, where),
+      // Patient messages nobody on the team has opened yet (opening the chat
+      // clears its count), in chats that aren't closed — as the inbox counts them.
+      prisma.conversation.findMany({
+        where: { ...where, unreadCount: { gt: 0 }, status: { not: "RESOLVED" } },
+        select: { assignedAgentId: true, unreadCount: true },
+      }),
     ]);
+    // Today's waits (patients who wrote today), for the response-time numbers.
+    const responses = recentResponses.filter((r) => r.askedAt >= today);
+    // Patients answered today, whenever they wrote: one per wait a person on
+    // the team replied to, however many messages that reply took.
+    const answeredToday = recentResponses.filter((r) => r.repliedAt && r.repliedAt >= today && r.agentId);
+    const unreadOf = (list) => ({ chats: list.length, messages: list.reduce((n, c) => n + c.unreadCount, 0) });
 
     // Today's waits only; a patient on two lines counts once.
     const recentSince = now.getTime() - RECENT_MS;
@@ -148,9 +163,13 @@ const getOverview = async (req, res, next) => {
 
     const board = agents.map((a) => {
       const mine = answered.filter((r) => r.agentId === a.id).map((r) => r.minutes);
+      const unread = unreadOf(unreadChats.filter((c) => c.assignedAgentId === a.id));
       return {
         ...a,
         openChats: assignedMap.get(a.id) || 0,
+        answeredToday: answeredToday.filter((r) => r.agentId === a.id).length,
+        unreadChats: unread.chats,
+        unreadMessages: unread.messages,
         waiting: waiting.filter((c) => c.assignedAgentId === a.id).length,
         waitingOverSla: overSla.filter((c) => c.assignedAgentId === a.id).length,
         repliesToday: repliesMap.get(a.id) || 0,
@@ -176,6 +195,10 @@ const getOverview = async (req, res, next) => {
           followUpsDue,
           avgFirstResponseMinutes: avg(answered.map((r) => r.minutes)),
           unansweredToday: responses.filter((r) => r.minutes === null).length,
+          answeredToday: answeredToday.length,
+          unreadChats: unreadOf(unreadChats).chats,
+          unreadMessages: unreadOf(unreadChats).messages,
+          unreadUnassignedChats: unreadChats.filter((c) => !c.assignedAgentId).length,
         },
         agents: board,
       },
@@ -186,11 +209,11 @@ const getOverview = async (req, res, next) => {
 };
 
 // ─── GET /api/supervision/conversations ─────────────────────────────────────
-// ?filter= waiting | cold | halfway | follow_up | all
+// ?filter= waiting | unread | cold | halfway | follow_up | all
 // &agentId= <id> | unassigned   &numberId=   &search=   &page=
 // One row per PATIENT: if they match on two lines, the newest chat is the row
 // and the others ride along in `otherChats`. Pages count patients.
-const FILTERS = ["waiting", "cold", "halfway", "follow_up", "all"];
+const FILTERS = ["waiting", "unread", "cold", "halfway", "follow_up", "all"];
 
 const getConversations = async (req, res, next) => {
   try {
@@ -212,6 +235,9 @@ const getConversations = async (req, res, next) => {
     const recentSince = new Date(now.getTime() - RECENT_MS);
     if (filter === "waiting") {
       where.awaitingReplySince = { gte: recentSince };
+      where.status = { not: "RESOLVED" };
+    } else if (filter === "unread") {
+      where.unreadCount = { gt: 0 };
       where.status = { not: "RESOLVED" };
     } else if (filter === "cold") {
       where.awaitingReplySince = { lt: recentSince };
@@ -271,6 +297,7 @@ const getConversations = async (req, res, next) => {
         whatsappNumber: c.whatsappNumber,
         assignedAgent: c.assignedAgent,
         status: c.status,
+        unreadCount: c.unreadCount,
         lastMessage: c.lastMessage,
         lastMessageAt: c.lastMessageAt,
         lastSenderType: c.lastSenderType,
