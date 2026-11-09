@@ -2,7 +2,8 @@ const prisma = require("../../config/prisma");
 const AppError = require("../../utils/AppError");
 const logAudit = require("../../utils/audit");
 const { findMarketingWords } = require("../../utils/marketingWords");
-const { listPlaceholders, SUPPORTED_VARS } = require("../../utils/templateVars");
+const { listPlaceholders, SUPPORTED_VARS, FILL_IN_KEYS } = require("../../utils/templateVars");
+const { validateHeader, validateButtons } = require("../../utils/templateValidation");
 const { fillInFields, templateNeedsSetup } = require("../../utils/templateSend");
 const { createTemplate, updateTemplate, submitForApproval, deleteTemplate } = require("./template.controller");
 
@@ -10,10 +11,13 @@ const { createTemplate, updateTemplate, submitForApproval, deleteTemplate } = re
 // The Patient messages page (supervisors, template:write_utility): simple
 // patient-care templates — "Your appointment is on {{date}} at {{time}}".
 // Deliberately narrow, so nothing made here can turn into marketing:
-//   - always category UTILITY (Meta UTILITY), text only: no header media, no
-//     buttons, no carousel;
+//   - always category UTILITY (Meta UTILITY). A header (text, image, video or
+//     document), a footer and buttons (quick reply, link, call) are allowed,
+//     under the regular editor's rules (utils/templateValidation.js) — but no
+//     Copy code button (that carries an offer code) and no carousel;
 //   - only the app's own blanks ({{first_name}}, {{date}}, {{time}}…);
-//   - offer wording is refused on save AND again on submit
+//   - offer wording is refused on save AND again on submit, anywhere the
+//     patient reads: name, header, body, footer, button labels and links
 //     (utils/marketingWords.js);
 //   - Meta may still re-classify one as MARKETING: the page shows it, and the
 //     send paths then treat it as marketing (agents can't send it, opted-out
@@ -23,6 +27,20 @@ const { createTemplate, updateTemplate, submitForApproval, deleteTemplate } = re
 const BODY_MAX = 800; // the regular editor's limit too
 const FOOTER_MAX = 60;
 const ARABIC_RE = /[؀-ۿ]/;
+// No Copy code: it carries an offer code.
+const CARE_BUTTON_TYPES = ["QUICK_REPLY", "URL", "PHONE_NUMBER"];
+
+// Every piece of text the patient sees, for the offer-wording check.
+const allText = (t) =>
+  [
+    t.name,
+    t.headerType === "TEXT" ? t.header : "",
+    t.body,
+    t.footer,
+    ...(Array.isArray(t.buttons) ? t.buttons.flatMap((b) => [b.title, b.url]) : []),
+  ]
+    .filter(Boolean)
+    .join("\n");
 
 const looksMarketing = (words) =>
   new AppError(
@@ -63,7 +81,25 @@ function cleanInput(body, { partial = false } = {}) {
     if (listPlaceholders(footer).length) throw new AppError("The footer can't have blanks", 400);
     out.footer = footer || null;
   }
-  const words = findMarketingWords(`${out.name || ""}\n${out.body || ""}\n${out.footer || ""}`);
+  if (!partial || body.headerType !== undefined) {
+    Object.assign(out, validateHeader(body.headerType || "NONE", body.header, body.headerMediaUrl));
+  }
+  if (!partial || body.buttons !== undefined) {
+    const buttons = validateButtons(body.buttons);
+    if (buttons?.some((b) => !CARE_BUTTON_TYPES.includes(b.type))) {
+      throw new AppError("A Copy code button is for offer codes, so it can't be on a patient-care message", 400);
+    }
+    // A link may end with the patient's name, not with a blank the agent
+    // types: links are filled in without the agent's answers.
+    for (const b of buttons || []) {
+      const v = b.type === "URL" ? listPlaceholders(b.url)[0] : null;
+      if (v && FILL_IN_KEYS.includes(v.toLowerCase())) {
+        throw new AppError(`The link on "${b.title}" can't end with {{${v}}}: only the patient's name can go into a link`, 400);
+      }
+    }
+    out.buttons = buttons;
+  }
+  const words = findMarketingWords(allText(out));
   if (words.length) throw looksMarketing(words);
   return out;
 }
@@ -109,11 +145,11 @@ const listUtilityTemplates = async (req, res, next) => {
   }
 };
 
-// POST /api/templates/utility { name, body, footer? }
+// POST /api/templates/utility { name, body, footer?, headerType?, header?, headerMediaUrl?, buttons? }
 const createUtilityTemplate = async (req, res, next) => {
   try {
     const clean = cleanInput(req.body || {});
-    const out = await run(createTemplate, { ...req, body: { ...clean, category: "UTILITY", headerType: "NONE", buttons: null } });
+    const out = await run(createTemplate, { ...req, body: { ...clean, category: "UTILITY" } });
     logAudit({ action: "template.created", actor: req.user, targetType: "Template", targetId: out.payload.data.id, details: { name: clean.name, category: "UTILITY" } });
     res.status(out.status).json({ ...out.payload, data: shape(out.payload.data) });
   } catch (err) {
@@ -121,13 +157,18 @@ const createUtilityTemplate = async (req, res, next) => {
   }
 };
 
-// PUT /api/templates/utility/:id { name?, body?, footer? } — drafts and rejected ones.
+// PUT /api/templates/utility/:id { name?, body?, footer?, headerType?, header?,
+// headerMediaUrl?, buttons? } — drafts and rejected ones.
 const updateUtilityTemplate = async (req, res, next) => {
   try {
     const existing = await findOwn(req);
     if (existing.approvalStatus === "SUBMITTED") return next(new AppError("It's waiting for WhatsApp's answer — it can be changed once WhatsApp replies", 400));
     if (existing.approvalStatus === "APPROVED") return next(new AppError("It's approved and in use. Make a new message instead of changing this one.", 400));
-    const clean = cleanInput({ name: existing.name, body: existing.body, footer: existing.footer, ...req.body });
+    // What isn't sent stays as it was; the header's three fields go together.
+    const header = req.body?.headerType !== undefined
+      ? {}
+      : { headerType: existing.headerType, header: existing.header, headerMediaUrl: existing.headerMediaUrl };
+    const clean = cleanInput({ name: existing.name, body: existing.body, footer: existing.footer, buttons: existing.buttons, ...header, ...req.body });
     const out = await run(updateTemplate, { ...req, body: { ...clean, category: "UTILITY" } });
     res.status(out.status).json({ ...out.payload, data: shape(out.payload.data) });
   } catch (err) {
@@ -140,7 +181,7 @@ const submitUtilityTemplate = async (req, res, next) => {
   try {
     const existing = await findOwn(req);
     // Again here: a draft saved before a word was added to the list.
-    const words = findMarketingWords(`${existing.name}\n${existing.body}\n${existing.footer || ""}`);
+    const words = findMarketingWords(allText(existing));
     if (words.length) return next(looksMarketing(words));
     // Meta's template name: lowercase English letters, digits and _. An Arabic
     // name would come out empty, and a deleted name stays reserved at Meta
