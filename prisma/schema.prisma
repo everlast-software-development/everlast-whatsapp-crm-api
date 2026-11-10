@@ -460,6 +460,10 @@ model Message {
   senderType          SenderType
   senderId            Int?
   sender              User?               @relation(fields: [senderId], references: [id])
+  // Who sent it when no person did (senderId null): "WEBSITE" = the online
+  // store's automatic messages (utils/storeEvents.js), shown as "Website" in
+  // the chat. null = a person, a campaign or a flow (senderType BOT).
+  origin              String?             @db.VarChar(20)
   content             String
   messageType         MessageType         @default(TEXT)
   whatsappMessageId   String? @unique

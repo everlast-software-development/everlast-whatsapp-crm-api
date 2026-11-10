@@ -255,7 +255,8 @@ async function sendStoreTemplate({ template, phone, variables }) {
   // {{first_name}} is the store's first name for them.
   const { resolvedBody, templateContent, sendArgs } = buildTemplateSend(template, { ...customer, name: name || customer.name }, null, { fields: variables });
   let message = await prisma.message.create({
-    data: { conversationId: conversation.id, senderType: "AGENT", senderId: null, content: templateContent, messageType: sendArgs.messageType, status: "PENDING" },
+    // origin: shown as "Website" in the chat, never as whoever is looking at it.
+    data: { conversationId: conversation.id, senderType: "AGENT", senderId: null, origin: "WEBSITE", content: templateContent, messageType: sendArgs.messageType, status: "PENDING" },
   });
   const announce = () => {
     if (!existed) emitToNumber(number.id, "conversation.created", { conversationId: conversation.id });
