@@ -4,7 +4,7 @@ const logAudit = require("../../utils/audit");
 const { sendWhatsAppMessage } = require("../../utils/whatsappClient");
 const { fetchAndStoreMedia } = require("../../utils/whatsappMedia");
 const { emitToNumber } = require("../../utils/socket");
-const { claimIfUnassigned } = require("../../utils/conversationAssignment");
+const { claimBeforeSend, releaseClaim } = require("../../utils/conversationAssignment");
 const { windowState, windowClosedError } = require("../../utils/messagingWindow");
 const numbers = require("../../utils/whatsappNumbers");
 const { handOffOnAgentReply } = require("../../utils/flowEngine");
@@ -61,6 +61,9 @@ const sendMessage = async (req, res, next) => {
 
     // Someone else owns this chat: only with an explicit "reply anyway".
     assertMayReply(conversation, req.user, req.body.confirmOtherOwner === true);
+    // Nobody owns it: take it before sending, so a colleague pressing Send at
+    // the same moment can't reach the patient too (utils/conversationAssignment.js).
+    const claimed = await claimBeforeSend(conversation, req.user, req.body.confirmOtherOwner === true);
 
     const messageContent = content || mediaUrl;
 
@@ -146,11 +149,9 @@ const sendMessage = async (req, res, next) => {
       },
     });
 
-    // Replying to an unassigned chat takes it, so it leaves the Unassigned queue
-    // and nobody else picks it up too. Only on a successful send: a failed send
-    // shouldn't quietly take ownership.
+    // The chat was taken for this message (above); a send that failed gives it back.
+    if (message.status === "FAILED" && claimed) await releaseClaim(conversation, req.user);
     if (message.status === "SENT") {
-      await claimIfUnassigned({ conversationId: parseInt(conversationId), numberId: conversation.whatsappNumberId, user: req.user });
       // A person is talking now: any flow in this chat steps aside.
       await handOffOnAgentReply(parseInt(conversationId));
     }

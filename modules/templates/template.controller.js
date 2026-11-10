@@ -6,7 +6,7 @@ const { sendWhatsAppMessage } = require("../../utils/whatsappClient");
 const numbers = require("../../utils/whatsappNumbers");
 const { emitToNumber } = require("../../utils/socket");
 const logAudit = require("../../utils/audit");
-const { claimIfUnassigned } = require("../../utils/conversationAssignment");
+const { claimBeforeSend, releaseClaim } = require("../../utils/conversationAssignment");
 const { roleHasPermission } = require("../../config/permissions");
 const { handOffOnAgentReply } = require("../../utils/flowEngine");
 const { readClientMessageId, findDuplicateSend, isClientIdRace, assertMayReply } = require("../../utils/replyGuards");
@@ -852,6 +852,8 @@ const sendTemplate = async (req, res, next) => {
     const duplicate = await findDuplicateSend(clientMessageId, conversation.id);
     if (duplicate) return res.status(200).json({ success: true, data: duplicate, duplicate: true });
     assertMayReply(conversation, req.user, req.body.confirmOtherOwner === true);
+    // Nobody owns it: take it before sending (see message.controller.js).
+    const claimed = await claimBeforeSend(conversation, req.user, req.body.confirmOtherOwner === true);
 
     // This block used to duplicate utils/templateSend.js inline. Two copies meant
     // every number-aware fix had to be made twice, and a test send would stop
@@ -902,11 +904,9 @@ const sendTemplate = async (req, res, next) => {
       },
     });
 
-    // Replying to an unassigned chat takes it, so it leaves the Unassigned queue
-    // and nobody else picks it up too. Only on a successful send: a failed send
-    // shouldn't quietly take ownership.
+    // The chat was taken for this message (above); a send that failed gives it back.
+    if (message.status === "FAILED" && claimed) await releaseClaim(conversation, req.user);
     if (message.status === "SENT") {
-      await claimIfUnassigned({ conversationId: conversationId, numberId: conversation.whatsappNumberId, user: req.user });
       await handOffOnAgentReply(conversationId);
     }
 

@@ -121,7 +121,41 @@ function assertMayAssign(conversation, user, targetId, { confirmTakeover = false
   return "takeover";
 }
 
+// ── Sending into a chat nobody owns ─────────────────────────────────────────
+// The chat is taken BEFORE the message goes to WhatsApp. Claiming after the
+// send let two agents pressing Send at the same moment both reach the patient
+// (each saw "unassigned", each sent, only then did one win the claim). Now the
+// claim is the gate: the first sender takes the chat and sends; the second is
+// told who has it (ASSIGNED_TO_OTHER — the browser asks "reply anyway?") and
+// nothing is sent unless they confirm.
+// Returns true when this call took the chat (release it again if the send fails).
+async function claimBeforeSend(conversation, user, confirmedOtherOwner) {
+  if (conversation.assignedAgentId || !canOwnChats(user.role)) return false;
+  const claimed = await claimIfUnassigned({ conversationId: conversation.id, numberId: conversation.whatsappNumberId, user });
+  if (claimed) return true;
+  // Someone took it between reading the chat and now.
+  const fresh = await prisma.conversation.findUnique({
+    where: { id: conversation.id },
+    select: { assignedAgentId: true, assignedAgent: { select: ASSIGNEE_SELECT } },
+  });
+  const { assertMayReply } = require("./replyGuards");
+  assertMayReply(fresh, user, confirmedOtherOwner);
+  return false;
+}
+
+// The send failed: a message that never reached the patient doesn't keep the chat.
+async function releaseClaim(conversation, user) {
+  const { count } = await prisma.conversation.updateMany({
+    where: { id: conversation.id, assignedAgentId: user.id },
+    data: { assignedAgentId: null },
+  });
+  if (!count) return;
+  emitToNumber(conversation.whatsappNumberId, "conversation.assigned", { conversationId: conversation.id, agentId: null, agentUsername: null });
+  emitToNumber(conversation.whatsappNumberId, "conversation.updated", { conversationId: conversation.id });
+}
+
 module.exports = {
+  claimBeforeSend, releaseClaim,
   ASSIGNEE_SELECT, isAssignable, canOwnChats, claimIfUnassigned,
   leadsTeam, assertMayChangeChat, assertMayAssign,
 };
