@@ -162,7 +162,7 @@ const getStoreOverview = async (req, res, next) => {
           storeCategory: seen?.category ?? null,
           lastValues: seen?.variables ?? null,
           lastSeenAt: seen?.receivedAt ?? null,
-          templates: mine.map((t) => ({ ...t, matchesStoreText: seen ? store.sameText(t.websiteConfig.sourceText, seen.templateText) : null })),
+          templates: mine,
           ready: match ? Boolean(match.template) : false,
           why: match ? match.why ?? null : "the store hasn't sent this message yet",
           last30Days: Object.fromEntries(counts.filter((c) => c.kind === kind && c.language === language).map((c) => [c.status, c._count._all])),
@@ -202,8 +202,6 @@ function cleanInput(body, existing = null) {
   if (!def) throw new AppError("Choose which store message it's for", 400);
   const language = merged.language === "ar" || merged.language === "en" ? merged.language : null;
   if (!language) throw new AppError("Choose English or Arabic", 400);
-  const sourceText = String(merged.sourceText || "").trim();
-  if (!sourceText) throw new AppError("Paste the text the store's staff wrote for this message", 400);
   const name = String(merged.name || "").trim();
   if (!name) throw new AppError("Give it a name", 400);
   if (name.length > 60) throw new AppError("The name can be at most 60 characters", 400);
@@ -237,7 +235,7 @@ function cleanInput(body, existing = null) {
       buttons: Array.isArray(merged.buttons) && merged.buttons.length ? merged.buttons : null,
     },
     kind,
-    config: { active: merged.active !== false, sourceText },
+    config: { active: merged.active !== false },
   };
 }
 
@@ -251,7 +249,7 @@ async function findWebsiteTemplate(id) {
   return t;
 }
 
-// POST /api/store/templates { websiteEvent, language, sourceText, name, body, header…, buttons, storeCategory }
+// POST /api/store/templates { websiteEvent, language, name, body, header…, buttons, storeCategory }
 const createWebsiteTemplate = async (req, res, next) => {
   try {
     const clean = cleanInput(req.body || {});
@@ -274,7 +272,6 @@ const updateWebsiteTemplate = async (req, res, next) => {
     const clean = cleanInput(req.body || {}, {
       ...existing,
       language: store.languageOf(existing),
-      sourceText: cfg.sourceText,
       active: cfg.active,
       storeCategory: store.isMarketing(existing) ? "marketing" : "utility",
     });

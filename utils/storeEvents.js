@@ -13,9 +13,9 @@
 //
 // WhatsApp only lets a business write first with a template Meta approved, so
 // each kind × language has a website template (Templates → Website), made from
-// the text staff wrote. A message is sent only with an approved template made
-// from exactly the store's current text: if staff change it, sends fail until
-// a template for the new text is approved — never the old words with new values.
+// the store's values. A message is sent with the approved, switched-on
+// template for its kind and language; the template's wording is what the
+// customer gets, whatever text staff wrote on the store's side.
 //
 // The answer: 2xx with { provider_message_id } once WhatsApp took it. Anything
 // else and the store tries again (3 tries over 30 minutes), with the same id:
@@ -167,7 +167,7 @@ function readMessage(body) {
 
 const configOf = (t) => {
   const c = t.websiteConfig && typeof t.websiteConfig === "object" ? t.websiteConfig : {};
-  return { active: c.active !== false, sourceText: typeof c.sourceText === "string" ? c.sourceText : null };
+  return { active: c.active !== false };
 };
 const languageOf = (t) => (t.language === "ar" ? "ar" : "en");
 const isMarketing = (t) => (t.metaCategory ? t.metaCategory === "MARKETING" : t.category !== "UTILITY" && t.category !== "GENERAL");
@@ -206,9 +206,11 @@ async function matchTemplate({ kind, language, templateText }) {
   });
   const what = `${STORE_KINDS[kind].label} (${LANGUAGE_NAMES[language]})`;
   if (!all.length) return { why: `there's no website template for ${what} yet` };
-  const forText = all.filter((t) => sameText(configOf(t).sourceText, templateText));
-  if (!forText.length) return { why: `the store's text for ${what} changed — make a template from the new text` };
-  const on = forText.filter((t) => configOf(t).active);
+  // Matched on kind × language only: the template's own wording is what the
+  // customer gets, filled with the store's values (templateText is kept for
+  // the log, not compared).
+  void templateText;
+  const on = all.filter((t) => configOf(t).active);
   if (!on.length) return { why: `the template for ${what} is switched off` };
   const approved = on.find((t) => t.approvalStatus === "APPROVED" && t.metaTemplateName);
   if (!approved) return { why: `the template for ${what} isn't approved by WhatsApp yet` };

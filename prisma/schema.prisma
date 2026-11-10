@@ -548,9 +548,8 @@ model Template {
   // template; website templates never show up in chats, campaigns or the
   // ordinary list.
   websiteEvent     String?                @db.VarChar(40)
-  // { active, sourceText } — whether it's switched on, and the text the
-  // store's staff wrote that it was made from ("Hi {first_name}, …"): a store
-  // message is sent with this template only while the store's text is the same.
+  // { active } — whether it's switched on. A store message is sent with the
+  // approved, switched-on template for its kind and language.
   websiteConfig    Json?
   storeMessages    StoreMessage[]
 
