@@ -17,6 +17,7 @@ router.get("/overview", c.getStoreOverview);
 router.get("/messages", c.listStoreMessages);
 
 router.post("/templates", c.createWebsiteTemplate);
+router.post("/templates/starter", c.createStarterDrafts);
 router.put("/templates/:id", c.updateWebsiteTemplate);
 router.put("/templates/:id/active", c.setWebsiteTemplateActive);
 router.post("/templates/:id/submit", c.submitWebsiteTemplate);

@@ -95,6 +95,16 @@ const KIND_KEYS = Object.keys(STORE_KINDS);
 const LANGUAGES = { en: "en_US", ar: "ar" };
 const LANGUAGE_NAMES = { en: "English", ar: "Arabic" };
 const USD_TO_AED = 3.6725;
+// Values the store may leave empty (Spin & Win only "while it is on"), and
+// what goes in their place: WhatsApp refuses an empty value.
+const FALLBACKS = {
+  spin: { en: "Thank you for choosing Everlast Wellness.", ar: "شكرًا لاختيارك إيفرلاست ويلنس." },
+};
+const withFallbacks = (variables, language) => {
+  const out = { ...variables };
+  for (const [k, by] of Object.entries(FALLBACKS)) if (!String(out[k] ?? "").trim()) out[k] = by[language] || by.en;
+  return out;
+};
 const REPORT_TRIES = 10;
 
 // ── The connection ─────────────────────────────────────────────────────────
@@ -160,7 +170,8 @@ function readMessage(body) {
     const key = String(k).trim().toLowerCase();
     if (/^[a-z_]{1,40}$/.test(key) && v !== null && v !== undefined && typeof v !== "object") variables[key] = String(v).slice(0, 1000);
   }
-  return { storeId: test ? null : id, test, kind, category, language, phone, text, templateText: tpl.text ? String(tpl.text) : null, variables };
+  // An empty {spin} (Spin & Win is off) gets its stand-in line; the store's own copy stays in payload.
+  return { storeId: test ? null : id, test, kind, category, language, phone, text, templateText: tpl.text ? String(tpl.text) : null, variables: withFallbacks(variables, language) };
 }
 
 // ── Templates ──────────────────────────────────────────────────────────────
@@ -474,6 +485,7 @@ module.exports = {
   rotateSecret,
   storeNumber,
   verifySignature,
+  withFallbacks,
   readMessage,
   toTemplateBody,
   sameText,

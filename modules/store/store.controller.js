@@ -5,7 +5,7 @@ const { getSetting, saveSetting } = require("../../utils/appSettings");
 const numbers = require("../../utils/whatsappNumbers");
 const store = require("../../utils/storeEvents");
 const { listPlaceholders, STORE_VARS } = require("../../utils/templateVars");
-const { findMarketingWords } = require("../../utils/marketingWords");
+const { STARTER_TEMPLATES } = require("../../utils/storeStarterTemplates");
 const { createTemplate, updateTemplate, submitForApproval, deleteTemplate } = require("../templates/template.controller");
 
 // ─── POST /api/webhooks/store ────────────────────────────────────────────────
@@ -217,11 +217,10 @@ function cleanInput(body, existing = null) {
   if (/^\{\{[^{}]+\}\}/.test(text) || /\{\{[^{}]+\}\}[.!?]?$/.test(text)) {
     throw new AppError("WhatsApp doesn't accept a message that starts or ends with a blank — add a word before or after it", 400);
   }
+  // The store decides the category ("a gift arrived" is a service message even
+  // though it says "gift"); WhatsApp has the last word when it approves it, and
+  // if it files it as marketing, opt-outs apply (isMarketing reads Meta's verdict).
   const category = merged.storeCategory === "utility" || merged.storeCategory === "marketing" ? merged.storeCategory : def.category;
-  if (category === "utility") {
-    const words = findMarketingWords([text, merged.header, merged.footer, ...(Array.isArray(merged.buttons) ? merged.buttons.map((b) => b.title) : [])].filter(Boolean).join("\n"));
-    if (words.length) throw new AppError(`This reads like an offer (${words.map((w) => `"${w}"`).join(", ")}), but the store sends it as a service message. WhatsApp would re-file it as marketing.`, 400, "LOOKS_LIKE_MARKETING", { words });
-  }
   return {
     template: {
       name,
@@ -257,6 +256,54 @@ const createWebsiteTemplate = async (req, res, next) => {
     const t = await prisma.template.update({ where: { id: out.payload.data.id }, data: { websiteEvent: clean.kind, websiteConfig: clean.config } });
     logAudit({ action: "template.created", actor: req.user, targetType: "Template", targetId: t.id, details: { name: t.name, websiteEvent: clean.kind } });
     res.status(201).json({ success: true, data: shape(t) });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// POST /api/store/templates/starter — a draft for every kind × language that
+// has no template yet, from the store's texts (utils/storeStarterTemplates.js),
+// each link as a button on the store address. Existing templates are left alone.
+const createStarterDrafts = async (req, res, next) => {
+  try {
+    const number = await store.storeNumber();
+    if (!number) return next(new AppError("Add a WhatsApp line first", 400));
+    const { linkBase } = store.settings();
+    const existing = await prisma.template.findMany({
+      where: { isActive: true, websiteEvent: { not: null }, wabaId: number.wabaId },
+      select: { websiteEvent: true, language: true },
+    });
+    const has = new Set(existing.map((t) => `${t.websiteEvent}|${t.language}`));
+    const created = [];
+    const skipped = [];
+    const failed = [];
+    for (const s of STARTER_TEMPLATES) {
+      const def = store.STORE_KINDS[s.kind];
+      for (const language of ["en", "ar"]) {
+        const label = `${def.label} (${language === "ar" ? "Arabic" : "English"})`;
+        if (has.has(`${s.kind}|${store.LANGUAGES[language]}`)) {
+          skipped.push(label);
+          continue;
+        }
+        try {
+          const clean = cleanInput({
+            websiteEvent: s.kind,
+            language,
+            storeCategory: def.category,
+            name: label,
+            body: s[language].body,
+            buttons: [{ id: "b0", type: "URL", title: s[language].button, url: `${linkBase}{{link}}` }],
+          });
+          const out = await run(createTemplate, await onStoreLine(req, clean.template));
+          await prisma.template.update({ where: { id: out.payload.data.id }, data: { websiteEvent: clean.kind, websiteConfig: clean.config } });
+          created.push(label);
+        } catch (err) {
+          failed.push({ template: label, error: err.message });
+        }
+      }
+    }
+    logAudit({ action: "template.created", actor: req.user, targetType: "Template", targetId: 0, details: { websiteStarterDrafts: created } });
+    res.status(201).json({ success: true, data: { created, skipped, failed } });
   } catch (err) {
     next(err);
   }
@@ -335,7 +382,7 @@ const testSendWebsiteTemplate = async (req, res, next) => {
     if (!phones.includes(phone)) return next(new AppError("Pick one of the staff test numbers (Settings → Campaign safety)", 400));
     const latest = await prisma.storeMessage.findFirst({ where: { kind: t.websiteEvent, language: store.languageOf(t) }, orderBy: { receivedAt: "desc" } });
     const examples = { first_name: "Sara", ...Object.fromEntries(Object.entries(STORE_VARS).map(([k, v]) => [k, v.sample])) };
-    const variables = { ...examples, ...(latest?.variables || {}) };
+    const variables = store.withFallbacks({ ...examples, ...(latest?.variables || {}) }, store.languageOf(t));
     const problems = store.valueProblems(t, variables);
     if (problems.length) return next(new AppError(problems.join("; "), 400));
     const sent = await store.sendStoreTemplate({ template: t, phone, variables });
@@ -355,6 +402,7 @@ module.exports = {
   listStoreMessages,
   getStoreOverview,
   createWebsiteTemplate,
+  createStarterDrafts,
   updateWebsiteTemplate,
   setWebsiteTemplateActive,
   submitWebsiteTemplate,
