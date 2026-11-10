@@ -542,6 +542,17 @@ model Template {
   createdAt        DateTime               @default(now())
   updatedAt        DateTime               @updatedAt
   campaigns        Campaign[]
+  // A website template (Templates → Website, admins): the WhatsApp template
+  // for one kind of message the online store sends first — abandoned_cart,
+  // points_expiring, rebooking… (utils/storeEvents.js). null = an ordinary
+  // template; website templates never show up in chats, campaigns or the
+  // ordinary list.
+  websiteEvent     String?                @db.VarChar(40)
+  // { active, sourceText } — whether it's switched on, and the text the
+  // store's staff wrote that it was made from ("Hi {first_name}, …"): a store
+  // message is sent with this template only while the store's text is the same.
+  websiteConfig    Json?
+  storeMessages    StoreMessage[]
 
   // Meta enforces template-name uniqueness per WABA. Postgres permits unlimited
   // NULLs in a unique index, so DRAFT templates — which have no metaTemplateName
@@ -988,4 +999,61 @@ model AiReply {
 
   @@index([conversationId, createdAt])
   @@index([createdAt])
+}
+
+// ─── Online store (website) ─────────────────────────────────────────────────
+// The store decides who gets which WhatsApp message and when (consent, budget,
+// limits, quiet hours) and posts each one, finished, to POST
+// /api/webhooks/store, signed with the shared secret (AppSetting
+// "storeWebhook"). The CRM sends it with the approved website template for its
+// kind and language, answers with WhatsApp's message id, and reports delivery
+// back to the store (utils/storeEvents.js). Every message is kept as received.
+
+enum StoreMessageStatus {
+  CAPTURED // a test from the store's staff page: kept, not sent (unless to a staff test phone)
+  SENDING  // being sent right now
+  SENT     // WhatsApp took it
+  FAILED   // not sent: no matching template, refused by WhatsApp… (the store tries again)
+  UNCONFIRMED // WhatsApp didn't answer clearly: it may have arrived, so it's never sent again
+}
+
+model StoreMessage {
+  id             Int                @id @default(autoincrement())
+  // The store's id for the message ("id"); de-duplicated on it. null for a
+  // test (the store sends those as id 0).
+  storeId        Int?               @unique
+  kind           String             @db.VarChar(40)
+  category       String             @db.VarChar(20)
+  language       String             @db.VarChar(5)
+  test           Boolean            @default(false)
+  // E.164 digits, no "+" (as Customer.phone).
+  phone          String             @db.VarChar(20)
+  // The finished message, and what staff wrote with this customer's values.
+  text           String
+  templateText   String?
+  variables      Json
+  payload        Json
+  status         StoreMessageStatus
+  reason         String?
+  attempts       Int                @default(1)
+  templateId     Int?
+  template       Template?          @relation(fields: [templateId], references: [id])
+  messageId      Int?               @unique
+  conversationId Int?
+  whatsappMessageId String?
+  // How it ended, from WhatsApp: "delivered" (read counts) | "failed", with
+  // what WhatsApp charged (AED; 0 when not billable or failed). Reported back
+  // to the store once (reportedAt); retried while the store doesn't answer.
+  delivery       String?            @db.VarChar(20)
+  deliveryError  String?
+  costAed        Decimal?           @db.Decimal(10, 4)
+  reportedAt     DateTime?
+  reportError    String?
+  reportTries    Int                @default(0)
+  receivedAt     DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+
+  @@index([receivedAt])
+  @@index([kind, language])
+  @@index([delivery, reportedAt])
 }

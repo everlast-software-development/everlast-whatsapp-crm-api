@@ -31,14 +31,41 @@ const FILL_INS = {
   details: { label: "Details", sample: "please arrive 10 minutes early" },
 };
 const FILL_IN_KEYS = Object.keys(FILL_INS);
+
+// Values the online store sends with each message (POST /api/webhooks/store —
+// utils/storeEvents.js), as the store names them, for website templates only:
+// "Hi {{first_name}}, {{treatment}} is still waiting in your cart". Not usable
+// in ordinary templates (nothing would fill them), so they're left out of
+// SUPPORTED_VARS. ({{first_name}} itself is the ordinary one: for a website
+// message it is the store's first_name.) `link`: a web address, usable at the
+// end of a link button.
+const STORE_VARS = {
+  treatment: { label: "Treatment", sample: "HydraFacial" },
+  count: { label: "Number of items", sample: "2" },
+  link: { label: "Link", sample: "https://everlastwellness.com/shop-cart", link: true },
+  points: { label: "Points", sample: "1,200" },
+  date: { label: "Date", sample: "30 November" },
+  spin: { label: "Spin & Win line", sample: "You also get a Spin & Win try." },
+  offer: { label: "Offer", sample: "20% off HydraFacial" },
+  ends: { label: "Offer ends", sample: "Sunday 16 November" },
+  sender: { label: "Gift from", sample: "Mona" },
+  amount: { label: "Amount", sample: "450.00 AED" },
+};
+const STORE_VAR_KEYS = Object.keys(STORE_VARS);
+
 // Example values Meta needs when a template is submitted for approval.
-const FILL_IN_SAMPLES = Object.fromEntries(FILL_IN_KEYS.map((k) => [k, FILL_INS[k].sample]));
+const FILL_IN_SAMPLES = Object.fromEntries([
+  ...FILL_IN_KEYS.map((k) => [k, FILL_INS[k].sample]),
+  ...STORE_VAR_KEYS.map((k) => [k, STORE_VARS[k].sample]),
+]);
 
 const RESOLVERS = {
   first_name: (customer) => cleanParam(cleanParam(customer?.name, "").split(" ")[0], "Customer"),
   customer_name: (customer) => cleanParam(customer?.name, "Customer"),
   agent_name: (_customer, agent) => cleanParam(agent?.name || agent?.username, "Team"),
   ...Object.fromEntries(FILL_IN_KEYS.map((k) => [k, (_c, _a, fields) => cleanParam(fields?.[k], "—")])),
+  // Website templates: the event's values come in as `fields` too.
+  ...Object.fromEntries(STORE_VAR_KEYS.map((k) => [k, (_c, _a, fields) => cleanParam(fields?.[k], "—")])),
 };
 
 const VAR_RE = /\{\{\s*([a-z_]+)\s*\}\}/gi;
@@ -92,12 +119,20 @@ const fillInsOf = (template) =>
 // Every {{...}} in the text, supported or not — for validation.
 const ANY_PLACEHOLDER_RE = /\{\{\s*([^{}]*?)\s*\}\}/g;
 const listPlaceholders = (text) => [...String(text || "").matchAll(ANY_PLACEHOLDER_RE)].map((m) => m[1]);
-const SUPPORTED_VARS = Object.keys(RESOLVERS);
+// What an ordinary template may use. Website templates may also use STORE_VARS.
+// (A store value that shares a name with a fill-in — {{date}} — stays usable:
+// in a chat the agent types it, in a website message the store sends it.)
+const SUPPORTED_VARS = Object.keys(RESOLVERS).filter((k) => !STORE_VAR_KEYS.includes(k) || FILL_IN_KEYS.includes(k));
+// (No agent sends a website message, and nobody types the fill-ins.)
+const WEBSITE_VARS = [...SUPPORTED_VARS.filter((k) => !FILL_IN_KEYS.includes(k) && k !== "agent_name"), ...STORE_VAR_KEYS];
 
 module.exports = {
   FILL_INS,
   FILL_IN_KEYS,
   FILL_IN_SAMPLES,
+  STORE_VARS,
+  STORE_VAR_KEYS,
+  WEBSITE_VARS,
   fillInsOf,
   cleanParam,
   SUPPORTED_VARS,

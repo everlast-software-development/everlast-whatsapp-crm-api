@@ -7,29 +7,43 @@
 // one — which is the whole point of having a test send.
 
 const AppError = require("./AppError");
-const { buildTemplateParams, resolveNamedVars, fillInsOf, FILL_INS } = require("./templateVars");
+const { buildTemplateParams, resolveNamedVars, fillInsOf, FILL_INS, STORE_VARS } = require("./templateVars");
 const { groupButtons } = require("./templateValidation");
 
 // A personalised link ends with one placeholder ({{first_name}}…): the value
 // goes into the URL, so it is percent-encoded ("Sarah Ahmed" → Sarah%20Ahmed).
 const VAR_AT_END_RE = /\{\{\s*[a-z_]+\s*\}\}$/i;
-const linkValue = (url, customer, agent) =>
-  VAR_AT_END_RE.test(url || "") ? encodeURIComponent(buildTemplateParams(url, customer, agent)[0] ?? "") : null;
+const END_VAR_NAME_RE = /\{\{\s*([a-z_]+)\s*\}\}$/i;
+// A store link ({{cart_url}}, {{tracking_url}}… — website templates) arrives as
+// a full address; the button's fixed part is its start, so only the rest is
+// sent, slashes kept: https://everlastwellness.com/{{cart_url}} with
+// "https://everlastwellness.com/cart/restore/8f2k1" → "cart/restore/8f2k1".
+const linkSuffix = (url, value) => {
+  const base = String(url || "").replace(VAR_AT_END_RE, "");
+  const v = String(value ?? "").trim();
+  return (base && v.startsWith(base) ? v.slice(base.length) : v).replace(/ /g, "%20");
+};
+const isStoreLink = (url) => Boolean(STORE_VARS[(String(url || "").match(END_VAR_NAME_RE)?.[1] || "").toLowerCase()]?.link);
+const linkValue = (url, customer, agent, fields) => {
+  if (!VAR_AT_END_RE.test(url || "")) return null;
+  const value = buildTemplateParams(url, customer, agent, fields)[0] ?? "";
+  return isStoreLink(url) ? linkSuffix(url, value) : encodeURIComponent(value);
+};
 
 // The buttons as this patient gets them — in the order Meta approved them
 // (Quick Replies grouped), links filled in — plus the per-button values an
 // approved template needs at send time: a personalised link's ending and a
 // Copy code button's code. Each value names its button by position.
-const buildButtons = (buttons, customer, agent) => {
+const buildButtons = (buttons, customer, agent, fields) => {
   const ordered = groupButtons(Array.isArray(buttons) ? buttons : []);
   const resolved = ordered.map((b) => {
-    const value = b.type === "URL" ? linkValue(b.url, customer, agent) : null;
+    const value = b.type === "URL" ? linkValue(b.url, customer, agent, fields) : null;
     return value === null ? b : { ...b, url: b.url.replace(VAR_AT_END_RE, value) };
   });
   const params = [];
   ordered.forEach((b, i) => {
     if (b.type === "URL") {
-      const value = linkValue(b.url, customer, agent);
+      const value = linkValue(b.url, customer, agent, fields);
       if (value !== null) params.push({ type: "button", sub_type: "url", index: String(i), parameters: [{ type: "text", text: value }] });
     } else if (b.type === "COPY_CODE" && b.code) {
       params.push({ type: "button", sub_type: "copy_code", index: String(i), parameters: [{ type: "coupon_code", coupon_code: b.code }] });
@@ -125,7 +139,7 @@ const buildTemplateSend = (template, customer, agent = null, { cardPayload = def
 
   const hasButtons =
     template.buttons && Array.isArray(template.buttons) && template.buttons.length > 0;
-  const { resolved: buttons, params: buttonParams } = buildButtons(template.buttons, customer, agent);
+  const { resolved: buttons, params: buttonParams } = buildButtons(template.buttons, customer, agent, fields);
 
   // A Meta-approved TEMPLATE send is the only shape that can open a new
   // conversation. Anything else goes out as an ad-hoc INTERACTIVE/TEXT
@@ -196,4 +210,4 @@ const buildTemplateSend = (template, customer, agent = null, { cardPayload = def
 // the API's template list, so the chat's picker can ask for them.
 const fillInFields = (template) => fillInsOf(template).map((key) => ({ key, label: FILL_INS[key].label }));
 
-module.exports = { fillInFields, buildTemplateSend, templateNeedsSetup, assertTemplateReady, isMetaSampleUrl };
+module.exports = { linkSuffix, isStoreLink, fillInFields, buildTemplateSend, templateNeedsSetup, assertTemplateReady, isMetaSampleUrl };

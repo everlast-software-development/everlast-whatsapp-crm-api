@@ -14,6 +14,7 @@ const { applySuppressions, liftSuppression } = require("../../utils/optOutSuppre
 const { attributeReply } = require("../../utils/campaignAttribution");
 const flowEngine = require("../../utils/flowEngine");
 const { autoAssign } = require("../../utils/autoAssign");
+const storeEvents = require("../../utils/storeEvents");
 const { patientWroteData } = require("../../utils/followUp");
 
 // An unrecognized phone_number_id is almost always a misrouted subscription, and
@@ -354,6 +355,16 @@ const handleOneStatus = async (statusEntry) => {
     where: { id: message.id },
     data,
   });
+
+  // A message the online store asked for: how it ended goes back to the store
+  // (utils/storeEvents.js). Meta's price may have come with an earlier status.
+  storeEvents
+    .noteDelivery(message.id, {
+      status: mapped,
+      pricing: pricing && typeof pricing.billable === "boolean" ? pricing : { billable: message.billable, category: message.pricingCategory },
+      error: statusEntry.errors?.[0] ? `${statusEntry.errors[0].code} ${statusEntry.errors[0].title || ""}`.trim() : null,
+    })
+    .catch((err) => console.error("Webhook: store delivery note failed:", err.message));
 
   // A campaign send Meta accepted and then failed: move that recipient from
   // SENT to FAILED so the campaign's Sent/Failed counts are true.

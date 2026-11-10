@@ -1323,6 +1323,8 @@ const createCampaign = async (req, res, next) => {
 
     const template = await prisma.template.findUnique({ where: { id: parseInt(templateId) } });
     if (!template || !template.isActive) return next(new AppError("Template not found", 404));
+    // Website templates are filled from a store event: nothing in a campaign could fill them.
+    if (template.websiteEvent) return next(new AppError("Website templates are sent by the store, not in campaigns", 400));
     if (template.approvalStatus !== "APPROVED") return next(new AppError("Template must be APPROVED before creating a campaign", 400));
     // An imported template still missing its variables or media.
     assertTemplateReady(template);
@@ -1492,6 +1494,7 @@ const updateCampaign = async (req, res, next) => {
     const template = await prisma.template.findUnique({ where: { id: templateChanged ? parseInt(templateId) : existing.templateId } });
     if (templateChanged) {
       if (!template || !template.isActive) return next(new AppError("Template not found", 404));
+      if (template.websiteEvent) return next(new AppError("Website templates are sent by the store, not in campaigns", 400));
       if (template.approvalStatus !== "APPROVED") return next(new AppError("Template must be APPROVED before it can be used in a campaign", 400));
       assertTemplateReady(template);
       numbers.assertTemplateUsable(template, req.number);

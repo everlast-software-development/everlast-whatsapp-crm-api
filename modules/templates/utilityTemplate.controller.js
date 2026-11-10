@@ -106,7 +106,7 @@ function cleanInput(body, { partial = false } = {}) {
 
 async function findOwn(req) {
   const t = await prisma.template.findFirst({
-    where: { id: parseInt(req.params.id), wabaId: req.number.wabaId, isActive: true, category: "UTILITY" },
+    where: { id: parseInt(req.params.id), wabaId: req.number.wabaId, isActive: true, category: "UTILITY", websiteEvent: null },
   });
   if (!t) throw new AppError("Message not found", 404);
   return t;
@@ -136,7 +136,7 @@ const shape = (t) => ({
 const listUtilityTemplates = async (req, res, next) => {
   try {
     const templates = await prisma.template.findMany({
-      where: { wabaId: req.number.wabaId, isActive: true, category: "UTILITY" },
+      where: { wabaId: req.number.wabaId, isActive: true, category: "UTILITY", websiteEvent: null },
       orderBy: { updatedAt: "desc" },
     });
     res.json({ success: true, data: templates.map(shape) });

@@ -23,7 +23,7 @@ const {
   groupButtons,
   validateCards,
 } = require("../../utils/templateValidation");
-const { templateNeedsSetup, assertTemplateReady, isMetaSampleUrl } = require("../../utils/templateSend");
+const { templateNeedsSetup, assertTemplateReady, isMetaSampleUrl, linkSuffix, isStoreLink } = require("../../utils/templateSend");
 const { mapMetaTemplate, chooseLanguageVersions, applyVariableMapping } = require("../../utils/templateImport");
 const { nameEquals, isRename, freeName, numbered } = require("../../utils/uniqueName");
 
@@ -110,7 +110,8 @@ const getTemplates = async (req, res, next) => {
     // Templates belong to a WABA, so two numbers on the same WABA see one shared
     // library and two numbers on different WABAs see none of each other's. That
     // fall-out is the whole reason wabaId is the key rather than the number id.
-    const where = { isActive: true, wabaId: req.number.wabaId };
+    // Website templates live on Templates → Website and are sent only by the store sender.
+    const where = { isActive: true, wabaId: req.number.wabaId, websiteEvent: null };
     if (req.query.category) {
       if (!VALID_CATEGORIES.includes(req.query.category)) {
         return next(new AppError(`Invalid category. Must be one of: ${VALID_CATEGORIES.join(", ")}`, 400));
@@ -172,8 +173,10 @@ const createTemplate = async (req, res, next) => {
 
     // A carousel's only free text is the body above the cards: no header,
     // footer or message-level buttons (Meta's rule for carousel templates).
-    const headerFields = cards ? validateHeader("NONE") : validateHeader(headerType, header, headerMediaUrl);
-    const validatedButtons = cards ? null : validateButtons(buttons);
+    // Website templates (utils/storeEvents.js) may also use the store's values.
+    const allowedVars = req.allowedVars;
+    const headerFields = cards ? validateHeader("NONE") : validateHeader(headerType, header, headerMediaUrl, allowedVars);
+    const validatedButtons = cards ? null : validateButtons(buttons, allowedVars);
     if (copyCodeOnGeneral(category || "GENERAL", validatedButtons)) return next(COPY_CODE_GENERAL());
 
     const template = await prisma.template.create({
@@ -235,8 +238,8 @@ const updateTemplate = async (req, res, next) => {
     }
     const headerFields = cards
       ? validateHeader("NONE")
-      : headerType !== undefined ? validateHeader(headerType, header, headerMediaUrl) : null;
-    const validatedButtons = cards ? null : buttons !== undefined ? validateButtons(buttons) : existing.buttons;
+      : headerType !== undefined ? validateHeader(headerType, header, headerMediaUrl, req.allowedVars) : null;
+    const validatedButtons = cards ? null : buttons !== undefined ? validateButtons(buttons, req.allowedVars) : existing.buttons;
     if (copyCodeOnGeneral(category || existing.category, validatedButtons)) return next(COPY_CODE_GENERAL());
 
     const template = await prisma.template.update({
@@ -431,6 +434,8 @@ const submitForApproval = async (req, res, next) => {
             // A personalised link: Meta wants its one variable as {{1}} at the
             // end, plus a full sample URL.
             const sample = buildTemplateParams(b.url, { name: "Sarah Ahmed" }, { name: "Alex" }, FILL_IN_SAMPLES);
+            // A store link's sample is a full address: send its ending, as at send time.
+            if (sample.length && isStoreLink(b.url)) sample[0] = linkSuffix(b.url, sample[0]);
             if (sample.length) {
               return {
                 type: "URL",
@@ -796,7 +801,8 @@ const sendTemplate = async (req, res, next) => {
     }
 
     const template = await prisma.template.findFirst({
-      where: { id: parseInt(templateId), wabaId: req.number.wabaId },
+      // Website templates are filled from a store event, never from a chat.
+      where: { id: parseInt(templateId), wabaId: req.number.wabaId, websiteEvent: null },
     });
     if (!template || !template.isActive) return next(new AppError("Template not found", 404));
     // An imported template whose variables or media aren't set up yet.

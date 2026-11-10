@@ -73,6 +73,49 @@ const SETTINGS = {
     },
   },
 
+  // The online store's connection (Templates → Website; utils/storeEvents.js).
+  // secret: the key the store signs every message with — made and replaced
+  // only by POST /api/store/settings/rotate, never typed in. numberId: the line
+  // website messages go out on (null = the default line). linkBase: how every
+  // store link starts — link buttons are built on it. apiBase + apiKey: the
+  // store's API and the access key it gave us (Bearer ak_…, Level 4), for the
+  // delivery reports sent back.
+  storeWebhook: {
+    defaults: { enabled: false, secret: null, numberId: null, linkBase: "https://everlastwellness.com/", apiBase: null, apiKey: null },
+    normalise(v, prev = {}) {
+      if (!v || typeof v !== "object") throw new AppError("Store settings must be an object", 400);
+      const out = { enabled: false, secret: null, numberId: null, linkBase: "https://everlastwellness.com/", apiBase: null, apiKey: null, ...prev };
+      if (v.apiBase !== undefined) {
+        const base = String(v.apiBase || "").trim().replace(/\/+$/, "");
+        if (base && !/^https:\/\/[^\s/]+\.[^\s/]+/i.test(base)) throw new AppError("The store's API address must start with https://", 400);
+        out.apiBase = base || null;
+      }
+      if (v.apiKey !== undefined) {
+        const key = String(v.apiKey || "").trim();
+        if (key && (key.length < 10 || key.length > 300 || /\s/.test(key))) throw new AppError("That doesn't look like an access key (ak_…)", 400);
+        out.apiKey = key || null;
+      }
+      if (v.enabled !== undefined) out.enabled = v.enabled === true;
+      if (v.secret !== undefined) {
+        if (!/^[a-f0-9]{64}$/.test(String(v.secret))) throw new AppError("Bad secret", 400);
+        out.secret = v.secret;
+      }
+      if (v.numberId !== undefined) {
+        const id = v.numberId === null || v.numberId === "" ? null : Number(v.numberId);
+        if (id !== null && !Number.isInteger(id)) throw new AppError("Choose a WhatsApp line", 400);
+        out.numberId = id;
+      }
+      if (v.linkBase !== undefined) {
+        let base = String(v.linkBase || "").trim();
+        if (!/^https:\/\/[^\s/]+\.[^\s/]+/i.test(base)) throw new AppError("The store address must start with https://, e.g. https://everlastwellness.com/", 400);
+        if (!base.endsWith("/")) base += "/";
+        out.linkBase = base;
+      }
+      if (out.enabled && !out.secret) throw new AppError("Make a secret key first", 400);
+      return out;
+    },
+  },
+
   // Staff phones a campaign test send may go to (Settings → Campaign safety).
   // A test send goes nowhere else, so "test" can't be used to message a
   // patient outside a reviewed campaign. Stored as E.164 digits, no "+".

@@ -24,7 +24,9 @@ const headerCharError = (text) => {
 // Validate the header type/content combination. Returns the clean triple to
 // persist — {headerType, header, headerMediaUrl} — so switching types never
 // leaves a stale value from the previous type behind.
-function validateHeader(headerType, header, headerMediaUrl) {
+// `allowed`: the placeholders this kind of template may use (website
+// templates pass WEBSITE_VARS).
+function validateHeader(headerType, header, headerMediaUrl, allowed = SUPPORTED_VARS) {
   const type = headerType || "NONE";
   if (!HEADER_TYPES.includes(type)) {
     throw new AppError(`Invalid headerType. Must be one of: ${HEADER_TYPES.join(", ")}`, 400);
@@ -39,8 +41,8 @@ function validateHeader(headerType, header, headerMediaUrl) {
     // Meta allows exactly one variable in a text header.
     const vars = listPlaceholders(text);
     if (vars.length > 1) throw new AppError("A text header can have at most 1 placeholder", 400);
-    if (vars.length === 1 && !SUPPORTED_VARS.includes(vars[0].toLowerCase())) {
-      throw new AppError(`Unknown placeholder {{${vars[0]}}} in the header. Use one of: ${SUPPORTED_VARS.join(", ")}`, 400);
+    if (vars.length === 1 && !allowed.includes(vars[0].toLowerCase())) {
+      throw new AppError(`Unknown placeholder {{${vars[0]}}} in the header. Use one of: ${allowed.join(", ")}`, 400);
     }
     return { headerType: "TEXT", header: text, headerMediaUrl: null };
   }
@@ -76,7 +78,7 @@ const groupButtons = (buttons) => {
   return isQr(buttons[0]) ? [...qr, ...other] : [...other, ...qr];
 };
 
-const validateButtons = (buttons) => {
+const validateButtons = (buttons, allowed = SUPPORTED_VARS) => {
   if (!buttons) return null;
   if (!Array.isArray(buttons)) throw new AppError("buttons must be an array", 400);
   if (buttons.length === 0) return null;
@@ -118,8 +120,8 @@ const validateButtons = (buttons) => {
       const vars = listPlaceholders(url);
       if (vars.length > 1) throw new AppError("A URL button can have at most 1 placeholder", 400);
       if (vars.length === 1) {
-        if (!SUPPORTED_VARS.includes(vars[0].toLowerCase())) {
-          throw new AppError(`Unknown placeholder {{${vars[0]}}} in "${title}". Use one of: ${SUPPORTED_VARS.join(", ")}`, 400);
+        if (!allowed.includes(vars[0].toLowerCase())) {
+          throw new AppError(`Unknown placeholder {{${vars[0]}}} in "${title}". Use one of: ${allowed.join(", ")}`, 400);
         }
         if (!/\{\{[^{}]*\}\}$/.test(url)) throw new AppError(`The placeholder in "${title}"'s link must be at the very end of the URL (Meta's rule)`, 400);
       }

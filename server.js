@@ -38,6 +38,8 @@ connectDB().then(async () => {
     startFollowUpReminders();
     // Chats that came in while nobody was online go out to agents once they are.
     require("./utils/autoAssign").startBacklogSharing();
+    // Messages the online store sends first: settle interrupted sends, retry delivery reports.
+    require("./utils/storeEvents").startStoreJobs();
   });
 });
 
