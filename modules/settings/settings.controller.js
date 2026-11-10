@@ -21,6 +21,7 @@ const getSettings = async (req, res, next) => {
         quietHours: { enabled: qh.enabled, start: qh.start, end: qh.end, timezone: qh.timezone, source: qh.source },
         campaignSafety: getSetting("campaignSafety"),
         testPhones: getSetting("testPhones"),
+        autoAssign: getSetting("autoAssign"),
       },
     });
   } catch (err) {

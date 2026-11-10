@@ -61,6 +61,18 @@ const SETTINGS = {
     },
   },
 
+  // Giving each new chat to one online agent automatically (utils/autoAssign.js).
+  // On unless an admin turns it off; off = the first person to reply takes it.
+  autoAssign: {
+    defaults: { enabled: true },
+    normalise(v) {
+      if (!v || typeof v !== "object" || typeof v.enabled !== "boolean") {
+        throw new AppError("Send { enabled: true } or { enabled: false }", 400);
+      }
+      return { enabled: v.enabled };
+    },
+  },
+
   // Staff phones a campaign test send may go to (Settings → Campaign safety).
   // A test send goes nowhere else, so "test" can't be used to message a
   // patient outside a reviewed campaign. Stored as E.164 digits, no "+".

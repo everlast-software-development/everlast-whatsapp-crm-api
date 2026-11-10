@@ -13,6 +13,7 @@ const { sendWhatsAppMessage } = require("../../utils/whatsappClient");
 const { applySuppressions, liftSuppression } = require("../../utils/optOutSuppression");
 const { attributeReply } = require("../../utils/campaignAttribution");
 const flowEngine = require("../../utils/flowEngine");
+const { autoAssign } = require("../../utils/autoAssign");
 const { patientWroteData } = require("../../utils/followUp");
 
 // An unrecognized phone_number_id is almost always a misrouted subscription, and
@@ -863,7 +864,7 @@ const processChangePayload = async (body) => {
     // Campaign automation. After the message is saved and shown, so a flow
     // problem can never lose or delay the customer's message; handleInbound
     // catches its own errors.
-    flowEngine.handleInbound({
+    const flowDone = flowEngine.handleInbound({
       numberId: number.id,
       customer,
       conversation,
@@ -872,6 +873,12 @@ const processChangePayload = async (body) => {
       // The flow engine only needs to know the patient opted out.
       optIntent: optIntent === "OUT_ALL" ? "OUT" : optIntent,
     });
+    // Nobody owns the chat: once the flow has had its say (it may be talking
+    // to the patient, or hand them over itself), give it to the next online
+    // agent, so the team doesn't race for it. A STOP needs no one.
+    if (!conversation.assignedAgentId && optIntent !== "OUT" && optIntent !== "OUT_ALL") {
+      flowDone.then(() => autoAssign(conversation.id, { reason: "new message" }));
+    }
     console.log("Webhook: done ✓");
   } catch (err) {
     console.error("=== WEBHOOK PROCESSING ERROR ===");

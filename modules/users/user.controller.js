@@ -1,5 +1,6 @@
 const bcryptjs = require("bcryptjs");
 const prisma = require("../../config/prisma");
+const { shareBacklog } = require("../../utils/autoAssign");
 const AppError = require("../../utils/AppError");
 const logAudit = require("../../utils/audit");
 const { ROLES, roleHasPermission } = require("../../config/permissions");
@@ -332,6 +333,8 @@ const updateMyStatus = async (req, res, next) => {
       data: { status },
       select: SAFE_SELECT,
     });
+    // Back from a break: patients waiting in Unassigned can go to them.
+    if (status === "ONLINE") shareBacklog();
 
     res.status(200).json({ success: true, data: user });
   } catch (err) {

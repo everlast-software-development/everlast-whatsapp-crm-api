@@ -132,6 +132,8 @@ const initSocket = (httpServer) => {
     if (socket.user?.id) {
       prisma.user
         .updateMany({ where: { id: socket.user.id, status: "OFFLINE", isActive: true }, data: { status: "ONLINE" } })
+        // Someone new is available: patients waiting in Unassigned can go to them.
+        .then((r) => r.count && require("./autoAssign").shareBacklog())
         .catch(() => {});
     }
 

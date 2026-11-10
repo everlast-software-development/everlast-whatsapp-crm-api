@@ -26,6 +26,13 @@ async function handOver(fromUserId, toUserId, actor, { reason = "hand over" } = 
     where: { id: { in: chats.map((c) => c.id) }, assignedAgentId: fromUserId },
     data: { assignedAgentId: to ? to.id : null },
   });
+  // Back to the queue: shared out to the agents who are online (never straight
+  // back to the person handing them over).
+  if (!to && chats.length) {
+    const auto = require("./autoAssign");
+    auto.rememberReleased(chats.map((c) => c.id), fromUserId);
+    auto.shareBacklog();
+  }
 
   for (const c of chats) {
     emitToNumber(c.whatsappNumberId, "conversation.assigned", { conversationId: c.id, agentId: to ? to.id : null, agentUsername: to ? to.username : null });

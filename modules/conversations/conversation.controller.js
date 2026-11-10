@@ -1,4 +1,5 @@
 const prisma = require("../../config/prisma");
+const { rememberReleased } = require("../../utils/autoAssign");
 const AppError = require("../../utils/AppError");
 const { emitToNumber } = require("../../utils/socket");
 const logAudit = require("../../utils/audit");
@@ -476,6 +477,8 @@ const assignConversation = async (req, res, next) => {
       return next(changedUnderneath(now?.assignedAgent ?? null));
     }
     const conversation = await prisma.conversation.findUnique({ where: { id: conversationId }, include });
+    // Given back: it may go to the next online agent, but not back to them.
+    if (targetId === null) rememberReleased([conversationId], existing.assignedAgentId);
 
     emitToNumber(req.numberId, "conversation.assigned", {
       conversationId,

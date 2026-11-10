@@ -36,6 +36,8 @@ connectDB().then(async () => {
     startWebhookRecovery();
     startNumberQualityWatch();
     startFollowUpReminders();
+    // Chats that came in while nobody was online go out to agents once they are.
+    require("./utils/autoAssign").startBacklogSharing();
   });
 });
 

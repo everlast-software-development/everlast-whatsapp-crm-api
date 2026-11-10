@@ -19,6 +19,7 @@
 // recorded on the run, not thrown.
 
 const prisma = require("../config/prisma");
+const { autoAssign } = require("./autoAssign");
 const numbers = require("./whatsappNumbers");
 const { sendWhatsAppMessage, sendTypingIndicator } = require("./whatsappClient");
 const { emitToNumber, emitToNumberStaff } = require("./socket");
@@ -264,13 +265,26 @@ async function sendBot(ctx, { kind, text, mediaType, mediaUrl, footer, header, b
  * frontend's HandoffNotifier) and start the patient's "waiting for a person"
  * clock. `alert` is merged into the event: who handed over and why (the
  * flow's name and the patient's interest). Used by the flow Assign step.
+ *
+ * No agent named: the chat's owner gets it; with no owner, it goes to the
+ * next online agent (utils/autoAssign.js) so the team doesn't race for it, and
+ * only with nobody online does the alert go to everyone.
  */
 async function handToTeam(ctx, { agent = null, alert = {} } = {}) {
-  await prisma.conversation.update({
+  const updated = await prisma.conversation.update({
     where: { id: ctx.conversation.id },
     data: { status: "OPEN", ...(agent ? { assignedAgentId: agent.id } : {}) },
+    select: { assignedAgent: { select: { id: true, username: true } } },
   });
-  if (agent) {
+  let announced = false;
+  if (!agent && updated.assignedAgent) {
+    agent = updated.assignedAgent;
+    announced = true; // already theirs
+  } else if (!agent) {
+    agent = await autoAssign(ctx.conversation.id, { reason: "flow hand-off", duringFlow: true, notify: false });
+    announced = Boolean(agent); // autoAssign told everyone who has it
+  }
+  if (agent && !announced) {
     emitToNumber(ctx.numberId, "conversation.assigned", {
       conversationId: ctx.conversation.id, agentId: agent.id, agentUsername: agent.username,
     });
