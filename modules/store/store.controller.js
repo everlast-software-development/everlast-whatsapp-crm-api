@@ -383,11 +383,25 @@ const testSendWebsiteTemplate = async (req, res, next) => {
     const latest = await prisma.storeMessage.findFirst({ where: { kind: t.websiteEvent, language: store.languageOf(t) }, orderBy: { receivedAt: "desc" } });
     const examples = { first_name: "Sara", ...Object.fromEntries(Object.entries(STORE_VARS).map(([k, v]) => [k, v.sample])) };
     const variables = store.withFallbacks({ ...examples, ...(latest?.variables || {}) }, store.languageOf(t));
+    // A link the button can't open (a developer's test copy sends
+    // http://localhost…) is swapped for an example on the store's address —
+    // only here, for the staff test; a real store message is never changed.
+    let swappedLink = false;
+    for (const b of Array.isArray(t.buttons) ? t.buttons : []) {
+      const m = b.type === "URL" ? String(b.url || "").match(/^(.*)\{\{\s*([a-z_]+)\s*\}\}$/i) : null;
+      if (!m || !STORE_VARS[m[2].toLowerCase()]?.link) continue;
+      const [, base, rawKey] = m;
+      const key = rawKey.toLowerCase();
+      if (!String(variables[key] || "").startsWith(base)) {
+        variables[key] = `${base}${new URL(STORE_VARS[key].sample).pathname.replace(/^\//, "")}`;
+        swappedLink = true;
+      }
+    }
     const problems = store.valueProblems(t, variables);
     if (problems.length) return next(new AppError(problems.join("; "), 400));
     const sent = await store.sendStoreTemplate({ template: t, phone, variables });
     logAudit({ action: "template.test_sent", actor: req.user, targetType: "Template", targetId: t.id, details: { phone, from: latest ? `store message ${latest.id}` : "examples" } });
-    res.json({ success: true, data: { messageId: sent.message.id, conversationId: sent.conversationId, usedStoreValues: Boolean(latest) } });
+    res.json({ success: true, data: { messageId: sent.message.id, conversationId: sent.conversationId, usedStoreValues: Boolean(latest), swappedLink } });
   } catch (err) {
     if (err.messageId) return next(new AppError(err.message, 502));
     next(err);
