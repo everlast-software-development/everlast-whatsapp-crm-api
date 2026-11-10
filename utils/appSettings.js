@@ -111,6 +111,8 @@ const SETTINGS = {
         if (!base.endsWith("/")) base += "/";
         out.linkBase = base;
       }
+      // Set once the starter website drafts were made (modules/store → seedStarterDraftsOnce).
+      if (v.starterSeeded !== undefined) out.starterSeeded = v.starterSeeded === true;
       if (out.enabled && !out.secret) throw new AppError("Make a secret key first", 400);
       return out;
     },

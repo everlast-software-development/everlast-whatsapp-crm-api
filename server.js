@@ -40,6 +40,8 @@ connectDB().then(async () => {
     require("./utils/autoAssign").startBacklogSharing();
     // Messages the online store sends first: settle interrupted sends, retry delivery reports.
     require("./utils/storeEvents").startStoreJobs();
+    // The first website drafts, made once (Templates → Website).
+    require("./modules/store/store.controller").seedStarterDraftsOnce().catch((err) => console.error("[Store] starter drafts failed:", err.message));
   });
 });
 

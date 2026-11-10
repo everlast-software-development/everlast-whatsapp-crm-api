@@ -264,10 +264,9 @@ const createWebsiteTemplate = async (req, res, next) => {
 // POST /api/store/templates/starter — a draft for every kind × language that
 // has no template yet, from the store's texts (utils/storeStarterTemplates.js),
 // each link as a button on the store address. Existing templates are left alone.
-const createStarterDrafts = async (req, res, next) => {
-  try {
+async function makeStarterDrafts(req) {
     const number = await store.storeNumber();
-    if (!number) return next(new AppError("Add a WhatsApp line first", 400));
+    if (!number) throw new AppError("Add a WhatsApp line first", 400);
     const { linkBase } = store.settings();
     const existing = await prisma.template.findMany({
       where: { isActive: true, websiteEvent: { not: null }, wabaId: number.wabaId },
@@ -302,12 +301,28 @@ const createStarterDrafts = async (req, res, next) => {
         }
       }
     }
-    logAudit({ action: "template.created", actor: req.user, targetType: "Template", targetId: 0, details: { websiteStarterDrafts: created } });
-    res.status(201).json({ success: true, data: { created, skipped, failed } });
+    if (created.length) logAudit({ action: "template.created", actor: req.user || null, targetType: "Template", targetId: 0, details: { websiteStarterDrafts: created } });
+    return { created, skipped, failed };
+}
+
+const createStarterDrafts = async (req, res, next) => {
+  try {
+    res.status(201).json({ success: true, data: await makeStarterDrafts(req) });
   } catch (err) {
     next(err);
   }
 };
+
+// At start-up, once ever: the starter drafts appear by themselves, so an admin
+// only reads them and sends them for approval. Never again after that, so a
+// draft someone deleted doesn't come back.
+async function seedStarterDraftsOnce() {
+  if (store.settings().starterSeeded) return;
+  const out = await makeStarterDrafts({});
+  await saveSetting("storeWebhook", { starterSeeded: true }, null);
+  console.log(`[Store] starter drafts: ${out.created.length} made, ${out.skipped.length} already there, ${out.failed.length} failed`);
+  for (const f of out.failed) console.error(`[Store] starter draft ${f.template} failed: ${f.error}`);
+}
 
 // PUT /api/store/templates/:id — drafts and rejected ones only.
 const updateWebsiteTemplate = async (req, res, next) => {
@@ -417,6 +432,7 @@ module.exports = {
   getStoreOverview,
   createWebsiteTemplate,
   createStarterDrafts,
+  seedStarterDraftsOnce,
   updateWebsiteTemplate,
   setWebsiteTemplateActive,
   submitWebsiteTemplate,
