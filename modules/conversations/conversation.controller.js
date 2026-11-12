@@ -625,7 +625,42 @@ const createOrGetConversation = async (req, res, next) => {
   }
 };
 
+// ─── GET /api/conversations/:id/ai-handoff ──────────────────────────────────
+// The store's AI's latest hand-over in this chat (utils/aiAssistant.js): when,
+// and the store's summary of what the customer needs — for the banner at the
+// top of the chat. null when the AI hasn't handed it over (in the last week).
+const getAiHandoff = async (req, res, next) => {
+  try {
+    const conversationId = parseInt(req.params.id);
+    const conversation = await prisma.conversation.findUnique({
+      where: { id: conversationId },
+      select: { whatsappNumberId: true, aiHandedOffAt: true },
+    });
+    if (!conversation || conversation.whatsappNumberId !== req.numberId) return next(new AppError("Conversation not found", 404));
+    const at = conversation.aiHandedOffAt;
+    if (!at || Date.now() - at.getTime() > 7 * 24 * 60 * 60 * 1000) return res.json({ success: true, data: null });
+    // The turn that handed over is recorded at the same moment (a few seconds' slack).
+    const turn = await prisma.aiReply.findFirst({
+      where: { conversationId, outcome: { in: ["HANDED_OFF", "ERROR"] }, createdAt: { gte: new Date(at.getTime() - 60 * 1000) } },
+      orderBy: { createdAt: "desc" },
+      select: { outcome: true, reason: true, createdAt: true },
+    });
+    res.json({
+      success: true,
+      data: {
+        at,
+        // HANDED_OFF: the store's summary. ERROR: the store didn't answer (or answered badly).
+        kind: turn?.outcome === "ERROR" ? "error" : "handover",
+        summary: turn?.outcome === "HANDED_OFF" ? turn.reason || null : null,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
+  getAiHandoff,
   getLineCounts,
   getAllConversations,
   getConversationCounts,

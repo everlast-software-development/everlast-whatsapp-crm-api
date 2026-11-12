@@ -123,11 +123,25 @@ const SETTINGS = {
   // answers — for trying it safely; "all": every customer. numberIds: the lines
   // it answers on ([] = every line). Uses the store API address + key from
   // Templates → Website (storeWebhook).
+  // The rules, editable by admins: quietHours — how long the AI stays out of a
+  // chat after handing it to the team (0 = none); gatherSeconds — the wait
+  // after each message before answering; maxGatherSeconds — the longest wait
+  // in all for someone who keeps writing.
   aiAssistant: {
-    defaults: { enabled: false, mode: "test", numberIds: [] },
+    defaults: { enabled: false, mode: "test", numberIds: [], quietHours: 24, gatherSeconds: 3, maxGatherSeconds: 10 },
     normalise(v, prev = {}) {
       if (!v || typeof v !== "object") throw new AppError("AI settings must be an object", 400);
-      const out = { enabled: false, mode: "test", numberIds: [], ...prev };
+      const out = { enabled: false, mode: "test", numberIds: [], quietHours: 24, gatherSeconds: 3, maxGatherSeconds: 10, ...prev };
+      const num = (key, min, max, label) => {
+        if (v[key] === undefined) return;
+        const n = Number(v[key]);
+        if (!Number.isFinite(n) || n < min || n > max) throw new AppError(`${label} must be between ${min} and ${max}`, 400);
+        out[key] = Math.round(n * 10) / 10;
+      };
+      num("quietHours", 0, 168, "The quiet time after a hand-over (hours)");
+      num("gatherSeconds", 1, 10, "The wait after each message (seconds)");
+      num("maxGatherSeconds", 1, 30, "The longest wait (seconds)");
+      if (out.maxGatherSeconds < out.gatherSeconds) throw new AppError("The longest wait can't be shorter than the wait after each message", 400);
       if (v.enabled !== undefined) out.enabled = v.enabled === true;
       if (v.mode !== undefined) {
         if (!["test", "all"].includes(v.mode)) throw new AppError('mode must be "test" or "all"', 400);

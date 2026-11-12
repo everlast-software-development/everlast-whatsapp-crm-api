@@ -9,6 +9,7 @@ const {
   markConversationRead,
   sendConversationTyping,
   getConversationProfile,
+  getAiHandoff,
   assignConversation,
   changeConversationStatus,
   createOrGetConversation,
@@ -28,6 +29,8 @@ router.get("/line-counts", requirePermission("conversation:read"), getLineCounts
 router.post("/", requirePermission("conversation:write"), createOrGetConversation);
 router.get("/:id/messages", requirePermission("conversation:read"), getConversationMessages);
 router.get("/:id/profile", requirePermission("conversation:read"), getConversationProfile);
+// The store's AI's latest hand-over (banner at the top of the chat).
+router.get("/:id/ai-handoff", requirePermission("conversation:read"), getAiHandoff);
 router.post("/:id/read", requirePermission("conversation:write"), markConversationRead);
 router.post("/:id/typing", requirePermission("conversation:write"), sendConversationTyping);
 router.put("/:id/assign", requirePermission("conversation:assign"), assignConversation);

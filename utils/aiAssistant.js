@@ -11,7 +11,7 @@
 // When it answers — the gate, checked when the message arrives AND again just
 // before sending: switched on for this line (and, in test mode, a staff test
 // phone); nobody owns the chat; no flow is running in it; not handed over in
-// the last 24 hours; not a STOP, customer not opted out.
+// the quiet time set in Settings (24 h by default); not a STOP, not opted out.
 //
 // A person takes over → stop(): the call waiting on the store is aborted, and
 // a late answer is never sent (the gate is checked again just before). The
@@ -41,14 +41,21 @@ const store = require("./storeEvents");
 
 const MODEL = "store:whatsapp_chat";
 const STORE_TIMEOUT_MS = 60 * 1000; // the store: "wait up to 60 seconds"
-const HANDOFF_QUIET_MS = 24 * 60 * 60 * 1000;
 const MEDIA_WAIT_MS = 10 * 1000;
 const ARABIC_RE = /[؀-ۿ]/;
-// WhatsApp doesn't tell a business when a customer is typing, so the AI waits:
-// GATHER_MS after each message (a new one restarts it), never more than
-// MAX_GATHER_MS from the first. Then all of it goes as one question.
-const GATHER_MS = Number(process.env.AI_GATHER_MS) || 3000;
-const MAX_GATHER_MS = Number(process.env.AI_MAX_GATHER_MS) || 10000;
+// The rules admins edit in Settings → AI assistant (utils/appSettings.js):
+// quiet time after a hand-over; and, since WhatsApp doesn't tell a business
+// when a customer is typing, the wait after each message (a new one restarts
+// it) and the longest wait in all — then everything goes as one question.
+// (AI_GATHER_MS / AI_MAX_GATHER_MS override the waits for the checks.)
+const rules = () => {
+  const c = getSetting("aiAssistant") || {};
+  return {
+    quietMs: (Number.isFinite(c.quietHours) ? c.quietHours : 24) * 60 * 60 * 1000,
+    gatherMs: Number(process.env.AI_GATHER_MS) || (Number(c.gatherSeconds) || 3) * 1000,
+    maxGatherMs: Number(process.env.AI_MAX_GATHER_MS) || (Number(c.maxGatherSeconds) || 10) * 1000,
+  };
+};
 
 // Per chat: its queue, the newest message's number, the call in flight, and
 // the messages still being gathered.
@@ -83,7 +90,7 @@ async function gateReason(conversationId, { requireActive = false } = {}) {
   if (c.mode !== "all" && !(getSetting("testPhones")?.phones || []).includes(conv.customer.phone)) return "test mode: not a staff test phone";
   if (conv.assignedAgentId) return "a person owns the chat";
   if (requireActive && !conv.aiActiveAt) return "stopped";
-  if (conv.aiHandedOffAt && Date.now() - conv.aiHandedOffAt.getTime() < HANDOFF_QUIET_MS) return "handed over to the team";
+  if (conv.aiHandedOffAt && Date.now() - conv.aiHandedOffAt.getTime() < rules().quietMs) return "handed over to the team";
   if (conv.customer.optedOut) return "opted out";
   const optOut = await prisma.customerOptOut.findUnique({
     where: { customerId_whatsappNumberId: { customerId: conv.customer.id, whatsappNumberId: conv.whatsappNumberId } },
@@ -159,6 +166,27 @@ async function askStore(body, { signal, lang }) {
   }
 }
 
+// Why the store's answer must not reach a customer, or null when it's fine. AI
+// models sometimes break down ("!!!!!!!…", one character repeated, no words,
+// pages of text): never sent — the chat goes to a person instead.
+const MAX_REPLY_CHARS = 2500;
+function brokenReply(text) {
+  const t = String(text || "").trim();
+  if (!t) return "the answer was empty";
+  if (t.length > MAX_REPLY_CHARS) return `the answer was ${t.length} characters long`;
+  const letters = (t.match(/\p{L}/gu) || []).length;
+  if (letters < 2) return "the answer had no words";
+  if (/(.)\1{14,}/u.test(t.replace(/\s/g, ""))) return "the answer repeated one character over and over";
+  const chars = [...t.replace(/\s/g, "")];
+  const counts = new Map();
+  for (const c of chars) counts.set(c, (counts.get(c) || 0) + 1);
+  const top = Math.max(...counts.values());
+  if (chars.length >= 20 && top / chars.length > 0.4 && !/\p{L}/u.test([...counts.entries()].find(([, n]) => n === top)[0])) {
+    return "the answer was mostly one symbol";
+  }
+  return null;
+}
+
 // The AI's answer as a chat message: a bot message marked AI ("AI" in the inbox).
 async function sendAiText(conversationId, numberId, phone, text) {
   const credentials = await numbers.getCredentials(numberId);
@@ -183,7 +211,7 @@ async function sendAiText(conversationId, numberId, phone, text) {
   return message;
 }
 
-// To the team: the AI stays quiet here for 24 h, the waiting clock starts, and
+// To the team: the AI stays quiet here for the quiet time, the waiting clock starts, and
 // the chat goes to an online agent (or waits in Unassigned) with the reason.
 async function handOver(conversationId, numberId, summary) {
   await prisma.conversation.update({ where: { id: conversationId }, data: { aiActiveAt: null, aiHandedOffAt: new Date() } });
@@ -251,8 +279,15 @@ async function turn({ conversationId, numberId, phone, name, items, seq }) {
     const answeredHere = data.duplicate
       ? await prisma.aiReply.count({ where: { inboundMessageId: message.id, outcome: { in: ["ANSWERED", "HANDED_OFF"] } } })
       : 0;
+    // A broken answer ("!!!!…") is never sent: the chat goes to a person.
+    const broken = !answeredHere && !data.handover ? brokenReply(data.text) : null;
+    if (broken) {
+      logError({ source: "api", message: `The store's AI sent a broken answer — not sent, the chat went to the team: ${broken}`, details: { sample: String(data.text || "").slice(0, 200) }, conversationId });
+      await handOver(conversationId, numberId, null);
+      return record({ ...base, ...extra, outcome: "ERROR", reason: "broken answer", error: `${broken}: ${String(data.text || "").slice(0, 200)}` });
+    }
     let reply = null;
-    if (typeof data.text === "string" && data.text.trim() && !answeredHere) {
+    if (typeof data.text === "string" && data.text.trim() && !answeredHere && !brokenReply(data.text)) {
       reply = await sendAiText(conversationId, numberId, phone, data.text.trim());
     }
     if (data.handover) {
@@ -307,7 +342,7 @@ async function handleInbound({ numberId, conversation, customer, message, rawTyp
     // (these go in the next question, which covers them).
     latest.set(id, (latest.get(id) || 0) + 1);
     // Wait for the customer to finish: each message restarts a short wait, never
-    // more than MAX_GATHER_MS in all; then everything they wrote goes as one.
+    // more than the longest wait in all; then everything they wrote goes as one.
     let p = pending.get(id);
     if (!p) {
       p = { items: [], firstAt: Date.now(), timer: null };
@@ -316,7 +351,8 @@ async function handleInbound({ numberId, conversation, customer, message, rawTyp
     p.items.push({ message, rawType, content });
     p.ctx = { numberId, phone: customer.phone, name: name || customer.name || null };
     clearTimeout(p.timer);
-    const wait = Math.max(0, Math.min(GATHER_MS, p.firstAt + MAX_GATHER_MS - Date.now()));
+    const { gatherMs, maxGatherMs } = rules();
+    const wait = Math.max(0, Math.min(gatherMs, p.firstAt + maxGatherMs - Date.now()));
     p.timer = setTimeout(() => flush(id), wait);
     return true;
   } catch (err) {

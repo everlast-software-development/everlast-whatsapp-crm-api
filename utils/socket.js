@@ -224,10 +224,18 @@ const joinNumberRoom = async (socket, requestedId) => {
 async function broadcastViewers(conversationId) {
   if (!io) return;
   const sockets = await io.in(chatRoom(conversationId)).fetchSockets();
+  // Someone whose status is Offline isn't shown as viewing, even with a tab
+  // still open on the chat (they ended their shift and left the browser open).
+  const userIds = [...new Set(sockets.map((s) => s.user?.id).filter(Boolean))];
+  const offline = new Set(
+    userIds.length
+      ? (await prisma.user.findMany({ where: { id: { in: userIds }, status: "OFFLINE" }, select: { id: true } })).map((u) => u.id)
+      : [],
+  );
   const people = new Map();
   for (const s of sockets) {
     const u = s.user;
-    if (u && !people.has(u.id)) people.set(u.id, { id: u.id, name: u.name || null, username: u.username });
+    if (u && !offline.has(u.id) && !people.has(u.id)) people.set(u.id, { id: u.id, name: u.name || null, username: u.username });
   }
   io.to(chatRoom(conversationId)).emit("conversation.viewers", { conversationId, viewers: [...people.values()] });
 }
