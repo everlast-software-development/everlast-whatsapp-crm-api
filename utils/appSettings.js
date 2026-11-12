@@ -138,6 +138,13 @@ const SETTINGS = {
         if (!Number.isFinite(n) || n < min || n > max) throw new AppError(`${label} must be between ${min} and ${max}`, 400);
         out[key] = Math.round(n * 10) / 10;
       };
+      // The picture on product cards until the store sends each product's own
+      // (WhatsApp takes JPG or PNG on a card). null = no cards without the store's.
+      if (v.cardImageUrl !== undefined) {
+        const u = String(v.cardImageUrl || "").trim();
+        if (u && !/^https:\/\/\S+\.(jpe?g|png)(\?\S*)?$/i.test(u)) throw new AppError("The card picture must be a JPG or PNG at an https address", 400);
+        out.cardImageUrl = u || null;
+      }
       num("quietHours", 0, 168, "The quiet time after a hand-over (hours)");
       num("gatherSeconds", 1, 10, "The wait after each message (seconds)");
       num("maxGatherSeconds", 1, 30, "The longest wait (seconds)");

@@ -34,10 +34,11 @@ const prisma = require("../config/prisma");
 const { getSetting } = require("./appSettings");
 const numbers = require("./whatsappNumbers");
 const { sendWhatsAppMessage, sendTypingIndicator } = require("./whatsappClient");
-const { emitToNumber } = require("./socket");
+const { emitToNumber, emitToNumberStaff } = require("./socket");
 const { botReplied, handedToTeam } = require("./followUp");
 const { logError } = require("./errorLog");
 const store = require("./storeEvents");
+const linkPreview = require("./linkPreview");
 
 const MODEL = "store:whatsapp_chat";
 const STORE_TIMEOUT_MS = 60 * 1000; // the store: "wait up to 60 seconds"
@@ -187,14 +188,17 @@ function brokenReply(text) {
   return null;
 }
 
-// The AI's answer as a chat message: a bot message marked AI ("AI" in the inbox).
-async function sendAiText(conversationId, numberId, phone, text) {
+// One AI message in the chat (a bot message marked AI — "AI" in the inbox):
+// `content` is what the inbox shows (text, or the JSON a card/button message
+// renders from), `sendArgs` what goes to WhatsApp.
+// @returns the message (status SENT or FAILED)
+async function sendAiMessage(conversationId, numberId, phone, { messageType, content, sendArgs, preview }) {
   const credentials = await numbers.getCredentials(numberId);
   let message = await prisma.message.create({
-    data: { conversationId, senderType: "BOT", senderId: null, origin: "AI", content: text, messageType: "TEXT", status: "PENDING" },
+    data: { conversationId, senderType: "BOT", senderId: null, origin: "AI", content, messageType, status: "PENDING" },
   });
   try {
-    const { whatsappMessageId } = await sendWhatsAppMessage({ number: credentials, to: phone, content: text, messageType: "TEXT" });
+    const { whatsappMessageId } = await sendWhatsAppMessage({ number: credentials, to: phone, ...sendArgs });
     message = await prisma.message.update({ where: { id: message.id }, data: { whatsappMessageId, status: "SENT" } });
   } catch (err) {
     const meta = err.response?.data?.error;
@@ -203,12 +207,139 @@ async function sendAiText(conversationId, numberId, phone, text) {
       data: { status: "FAILED", errorCode: Number(meta?.code) || null, errorTitle: (meta?.message || err.message).slice(0, 500) },
     });
   }
-  await prisma.conversation.update({ where: { id: conversationId }, data: { lastMessage: text, lastMessageAt: new Date(), lastSenderType: "BOT" } });
+  await prisma.conversation.update({ where: { id: conversationId }, data: { lastMessage: preview, lastMessageAt: new Date(), lastSenderType: "BOT" } });
   // The customer is talking to the AI, not waiting for a person.
   await botReplied(conversationId);
   emitToNumber(numberId, "message.created", { message, conversationId });
   emitToNumber(numberId, "conversation.updated", { conversationId });
   return message;
+}
+
+const sendAiText = (conversationId, numberId, phone, text) =>
+  sendAiMessage(conversationId, numberId, phone, { messageType: "TEXT", content: text, sendArgs: { content: text, messageType: "TEXT" }, preview: text });
+
+// ── Rich answers: product cards, a pay button, a location pin ──────────────
+// The store's answer comes with `links` ({ type, title, price, url, image?,
+// latitude?, longitude?, name?, address? }). Products become a swipeable row
+// of cards (one product: one card) with a "View" button; a payment link a
+// "Pay now" button; a location a real map pin. WhatsApp needs a JPG or PNG on
+// every card: the store's own image, else the photo read from the product's
+// page, else the card picture set in Settings → AI assistant; without any,
+// the plain text goes as before.
+
+const IMAGE_RE = /^https:\/\/\S+\.(jpe?g|png)(\?\S*)?$/i;
+const isHttps = (u) => /^https:\/\/\S+$/i.test(String(u || ""));
+const cut = (s, n) => (String(s || "").length > n ? `${String(s).slice(0, n - 1)}…` : String(s || ""));
+
+const PREVIEW_BUDGET_MS = 10 * 1000;
+
+// A card's picture and details, best first: the store's own JPG/PNG; the
+// store's picture in another format, turned into a JPG; the photo on the
+// product's page (utils/linkPreview.js); the card picture in Settings.
+async function cardFor(link) {
+  const preview = await linkPreview.previewOf(link.url);
+  let img = IMAGE_RE.test(String(link.image || "")) ? link.image : null;
+  if (!img && link.image) img = await linkPreview.cardImageFromUrl(link.image);
+  if (!img) img = preview?.image || null;
+  if (!img) {
+    const fallback = conf().cardImageUrl;
+    img = IMAGE_RE.test(String(fallback || "")) ? fallback : null;
+  }
+  return { ...link, title: link.title || preview?.title || null, img };
+}
+
+// All cards at once, and never longer than PREVIEW_BUDGET_MS: a slow page
+// leaves its card without a picture (→ the plain text) rather than holding
+// the answer up.
+async function cardsFor(products) {
+  let timer;
+  const late = new Promise((resolve) => { timer = setTimeout(() => resolve(null), PREVIEW_BUDGET_MS); });
+  const cards = await Promise.all(products.map((p) => Promise.race([cardFor(p).catch(() => null), late]).then((c) => c || { ...p, img: null })));
+  clearTimeout(timer);
+  return cards;
+}
+
+function readLinks(data) {
+  const links = Array.isArray(data.links) ? data.links.filter((l) => l && typeof l === "object") : [];
+  const lat = (l) => Number(l.latitude ?? l.lat);
+  const lng = (l) => Number(l.longitude ?? l.lng ?? l.lon);
+  return {
+    products: links.filter((l) => l.type !== "payment" && l.type !== "location" && isHttps(l.url)),
+    payments: links.filter((l) => l.type === "payment" && isHttps(l.url)),
+    locations: links
+      .filter((l) => l.type === "location" && Number.isFinite(lat(l)) && Number.isFinite(lng(l)) && Math.abs(lat(l)) <= 90 && Math.abs(lng(l)) <= 180)
+      .map((l) => ({ latitude: lat(l), longitude: lng(l), name: l.name || l.title || null, address: l.address || null })),
+  };
+}
+
+/**
+ * Send the store's answer the best way WhatsApp allows: product cards, a pay
+ * button, a pin — else the plain text. A rich message WhatsApp refuses falls
+ * back to the plain text, so the customer always gets the answer.
+ * @returns the first message saved (for the AiReply record)
+ */
+async function sendAnswer(conversationId, numberId, phone, data) {
+  const fullText = String(data.text || "").trim();
+  const reply = String(data.reply || "").trim() || fullText;
+  const ar = ARABIC_RE.test(reply);
+  const { products, payments, locations } = readLinks(data);
+  const cards = await cardsFor(products.slice(0, 10));
+  const canCards = cards.length > 0 && cards.every((c) => c.img && c.title);
+  if (!canCards && !payments.length && !locations.length) return sendAiText(conversationId, numberId, phone, fullText);
+
+  const sent = [];
+  const view = ar ? "عرض" : "View";
+  const cardBody = (c) => cut([c.title, c.price].filter(Boolean).join("\n"), 160);
+  if (canCards && cards.length >= 2) {
+    // One message: the AI's sentence above a swipeable row of cards.
+    const carousel = cards.map((c, i) => ({ mediaType: "IMAGE", mediaUrl: c.img, body: cardBody(c), buttons: [{ id: `p${i}`, type: "URL", title: view, url: c.url }] }));
+    sent.push(await sendAiMessage(conversationId, numberId, phone, {
+      messageType: "INTERACTIVE",
+      content: JSON.stringify({ body: cut(reply, 1024), cards: carousel }),
+      sendArgs: { content: cut(reply, 1024), messageType: "INTERACTIVE", carousel },
+      preview: reply,
+    }));
+  } else if (canCards) {
+    // One product: its picture, the AI's sentence, and a View button.
+    const c = cards[0];
+    const body = cut(`${reply}\n\n${cardBody(c)}`, 1024);
+    const buttons = [{ id: "view", type: "URL", title: view, url: c.url }];
+    sent.push(await sendAiMessage(conversationId, numberId, phone, {
+      messageType: "INTERACTIVE",
+      content: JSON.stringify({ headerType: "IMAGE", headerMediaUrl: c.img, body, buttons }),
+      sendArgs: { content: body, messageType: "INTERACTIVE", headerType: "IMAGE", headerMediaUrl: c.img, buttons },
+      preview: reply,
+    }));
+  } else {
+    // No cards possible: the AI's sentence alone (the pay button / pin follow).
+    sent.push(await sendAiText(conversationId, numberId, phone, products.length ? fullText : reply));
+  }
+  for (const p of payments.slice(0, 1)) {
+    const buttons = [{ id: "pay", type: "URL", title: ar ? "ادفع الآن" : "Pay now", url: p.url }];
+    const body = cut(p.title || (ar ? "رابط الدفع الآمن" : "Your secure payment link"), 1024);
+    sent.push(await sendAiMessage(conversationId, numberId, phone, {
+      messageType: "INTERACTIVE",
+      content: JSON.stringify({ body, buttons }),
+      sendArgs: { content: body, messageType: "INTERACTIVE", buttons },
+      preview: body,
+    }));
+  }
+  for (const loc of locations.slice(0, 1)) {
+    const mapUrl = `https://maps.google.com/?q=${loc.latitude},${loc.longitude}`;
+    const shown = ["📍 " + (loc.name || (ar ? "الموقع" : "Location")), loc.address, mapUrl].filter(Boolean).join("\n");
+    sent.push(await sendAiMessage(conversationId, numberId, phone, {
+      messageType: "TEXT",
+      content: shown,
+      sendArgs: { content: shown, messageType: "TEXT", location: loc },
+      preview: shown,
+    }));
+  }
+  // WhatsApp refused a rich message: the customer gets the plain text instead.
+  if (sent.some((m) => m.status === "FAILED") && fullText) {
+    console.warn("[AI] a rich answer was refused — sent as plain text");
+    return sendAiText(conversationId, numberId, phone, fullText);
+  }
+  return sent[0];
 }
 
 // To the team: the AI stays quiet here for the quiet time, the waiting clock starts, and
@@ -222,7 +353,23 @@ async function handOver(conversationId, numberId, summary) {
       .catch(() => {});
   }
   emitToNumber(numberId, "conversation.updated", { conversationId });
-  await require("./autoAssign").autoAssign(conversationId, { reason: "AI hand-over", note: summary || null });
+  const agent = await require("./autoAssign").autoAssign(conversationId, { reason: "AI hand-over", note: summary || null });
+  // Nobody to give it to (no agent online, or automatic assignment off): the
+  // whole team on the line is alerted instead — the alert flows raise — so a
+  // supervisor or admin can take it. It waits in Unassigned meanwhile.
+  if (!agent) {
+    const conv = await prisma.conversation.findUnique({ where: { id: conversationId }, select: { customer: { select: { name: true, phone: true } } } });
+    emitToNumberStaff(numberId, "flow.handoff", {
+      conversationId,
+      customerName: conv?.customer?.name || null,
+      customerPhone: conv?.customer?.phone || "",
+      agentId: null,
+      agentUsername: null,
+      flowName: "AI assistant",
+      interest: summary || null,
+      at: new Date().toISOString(),
+    });
+  }
 }
 
 // One message's text for the store: typed text and button taps; a photo's caption.
@@ -288,7 +435,7 @@ async function turn({ conversationId, numberId, phone, name, items, seq }) {
     }
     let reply = null;
     if (typeof data.text === "string" && data.text.trim() && !answeredHere && !brokenReply(data.text)) {
-      reply = await sendAiText(conversationId, numberId, phone, data.text.trim());
+      reply = await sendAnswer(conversationId, numberId, phone, data);
     }
     if (data.handover) {
       await handOver(conversationId, numberId, data.summary || null);

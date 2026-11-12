@@ -47,6 +47,9 @@ const sendWhatsAppMessage = async ({
   // INTERACTIVE carousel (no template, 24h window only):
   // [{ mediaType, mediaUrl, body?, buttons: [{ type: QUICK_REPLY, id, title } | { type: URL, title, url }] }]
   carousel = null,
+  // A location pin (TEXT messages only): { latitude, longitude, name?, address? }.
+  // The customer sees a map and taps it to open their maps app.
+  location = null,
 }) => {
   // No environment fallback, deliberately. A fallback would mean a call site
   // that forgot to pass `number` keeps silently sending from whichever line the
@@ -68,6 +71,16 @@ const sendWhatsAppMessage = async ({
 
   switch (messageType) {
     case "TEXT":
+      if (location) {
+        payload.type = "location";
+        payload.location = {
+          latitude: Number(location.latitude),
+          longitude: Number(location.longitude),
+          ...(location.name && { name: String(location.name).slice(0, 100) }),
+          ...(location.address && { address: String(location.address).slice(0, 300) }),
+        };
+        break;
+      }
       payload.text = { body: content };
       break;
     case "IMAGE":
