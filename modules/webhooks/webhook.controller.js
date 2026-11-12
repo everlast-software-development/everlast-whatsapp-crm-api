@@ -15,6 +15,7 @@ const { attributeReply } = require("../../utils/campaignAttribution");
 const flowEngine = require("../../utils/flowEngine");
 const { autoAssign } = require("../../utils/autoAssign");
 const storeEvents = require("../../utils/storeEvents");
+const aiAssistant = require("../../utils/aiAssistant");
 const { patientWroteData } = require("../../utils/followUp");
 
 // An unrecognized phone_number_id is almost always a misrouted subscription, and
@@ -885,11 +886,23 @@ const processChangePayload = async (body) => {
       optIntent: optIntent === "OUT_ALL" ? "OUT" : optIntent,
     });
     // Nobody owns the chat: once the flow has had its say (it may be talking
-    // to the patient, or hand them over itself), give it to the next online
-    // agent, so the team doesn't race for it. A STOP needs no one.
-    if (!conversation.assignedAgentId && optIntent !== "OUT" && optIntent !== "OUT_ALL") {
-      flowDone.then(() => autoAssign(conversation.id, { reason: "new message" }));
+    // to the patient, or hand them over itself), the store's AI answers it
+    // when it's switched on (utils/aiAssistant.js); otherwise the next online
+    // agent gets it, so the team doesn't race for it. A STOP needs no one.
+    const stopping = optIntent === "OUT" || optIntent === "OUT_ALL";
+    if (!conversation.assignedAgentId && !stopping) {
+      flowDone.then(async () => {
+        const aiTook = await aiAssistant.handleInbound({ numberId: number.id, conversation, customer, message, rawType, content, name, optIntent });
+        if (!aiTook) await autoAssign(conversation.id, { reason: "new message" });
+      });
     }
+    // STOP: the AI stops in this chat, and the store's own WhatsApp switch goes off too.
+    if (stopping) {
+      aiAssistant.stop(conversation.id, "the customer opted out");
+      storeEvents.sendStoreConsent(customer.phone, false);
+    }
+    // They opted back in (START…): the store's switch goes back on too.
+    if (optIntent === "IN") storeEvents.sendStoreConsent(customer.phone, true);
     console.log("Webhook: done ✓");
   } catch (err) {
     console.error("=== WEBHOOK PROCESSING ERROR ===");

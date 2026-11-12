@@ -479,6 +479,8 @@ const assignConversation = async (req, res, next) => {
     const conversation = await prisma.conversation.findUnique({ where: { id: conversationId }, include });
     // Given back: it may go to the next online agent, but not back to them.
     if (targetId === null) rememberReleased([conversationId], existing.assignedAgentId);
+    // Given to a person: the store's AI stops in this chat.
+    else require("../../utils/aiAssistant").stop(conversationId, "assigned to a person");
 
     emitToNumber(req.numberId, "conversation.assigned", {
       conversationId,

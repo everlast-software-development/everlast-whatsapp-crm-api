@@ -36,6 +36,8 @@ async function claimIfUnassigned({ conversationId, numberId, user }) {
     data: { assignedAgentId: user.id },
   });
   if (count === 0) return false;
+  // A person has it now: the store's AI stops (utils/aiAssistant.js).
+  require("./aiAssistant").stop(conversationId, "a person took the chat");
 
   emitToNumber(numberId, "conversation.assigned", {
     conversationId,

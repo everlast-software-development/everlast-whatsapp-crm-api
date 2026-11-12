@@ -913,6 +913,7 @@ const sendTemplate = async (req, res, next) => {
     // The chat was taken for this message (above); a send that failed gives it back.
     if (message.status === "FAILED" && claimed) await releaseClaim(conversation, req.user);
     if (message.status === "SENT") {
+      require("../../utils/aiAssistant").stop(conversationId, "a staff member replied");
       await handOffOnAgentReply(conversationId);
     }
 

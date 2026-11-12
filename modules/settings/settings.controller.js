@@ -22,6 +22,7 @@ const getSettings = async (req, res, next) => {
         campaignSafety: getSetting("campaignSafety"),
         testPhones: getSetting("testPhones"),
         autoAssign: getSetting("autoAssign"),
+        aiAssistant: getSetting("aiAssistant"),
       },
     });
   } catch (err) {

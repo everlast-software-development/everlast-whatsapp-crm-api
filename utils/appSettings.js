@@ -118,6 +118,29 @@ const SETTINGS = {
     },
   },
 
+  // The store's AI answering chats nobody owns (utils/aiAssistant.js).
+  // mode "test": only staff test phones (Settings → Campaign safety) get AI
+  // answers — for trying it safely; "all": every customer. numberIds: the lines
+  // it answers on ([] = every line). Uses the store API address + key from
+  // Templates → Website (storeWebhook).
+  aiAssistant: {
+    defaults: { enabled: false, mode: "test", numberIds: [] },
+    normalise(v, prev = {}) {
+      if (!v || typeof v !== "object") throw new AppError("AI settings must be an object", 400);
+      const out = { enabled: false, mode: "test", numberIds: [], ...prev };
+      if (v.enabled !== undefined) out.enabled = v.enabled === true;
+      if (v.mode !== undefined) {
+        if (!["test", "all"].includes(v.mode)) throw new AppError('mode must be "test" or "all"', 400);
+        out.mode = v.mode;
+      }
+      if (v.numberIds !== undefined) {
+        if (!Array.isArray(v.numberIds) || v.numberIds.some((n) => !Number.isInteger(Number(n)))) throw new AppError("numberIds must be a list of line ids", 400);
+        out.numberIds = [...new Set(v.numberIds.map(Number))];
+      }
+      return out;
+    },
+  },
+
   // Staff phones a campaign test send may go to (Settings → Campaign safety).
   // A test send goes nowhere else, so "test" can't be used to message a
   // patient outside a reviewed campaign. Stored as E.164 digits, no "+".

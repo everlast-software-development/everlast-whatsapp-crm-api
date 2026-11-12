@@ -152,6 +152,8 @@ const sendMessage = async (req, res, next) => {
     // The chat was taken for this message (above); a send that failed gives it back.
     if (message.status === "FAILED" && claimed) await releaseClaim(conversation, req.user);
     if (message.status === "SENT") {
+      // A person is talking now: the store's AI stops too.
+      require("../../utils/aiAssistant").stop(parseInt(conversationId), "a staff member replied");
       // A person is talking now: any flow in this chat steps aside.
       await handOffOnAgentReply(parseInt(conversationId));
     }

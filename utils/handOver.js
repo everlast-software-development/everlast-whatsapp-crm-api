@@ -34,6 +34,7 @@ async function handOver(fromUserId, toUserId, actor, { reason = "hand over" } = 
     auto.shareBacklog();
   }
 
+  if (to) for (const c of chats) require("./aiAssistant").stop(c.id, "handed to a person");
   for (const c of chats) {
     emitToNumber(c.whatsappNumberId, "conversation.assigned", { conversationId: c.id, agentId: to ? to.id : null, agentUsername: to ? to.username : null });
     emitToNumber(c.whatsappNumberId, "conversation.updated", { conversationId: c.id });

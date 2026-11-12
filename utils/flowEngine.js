@@ -284,6 +284,7 @@ async function handToTeam(ctx, { agent = null, alert = {} } = {}) {
     agent = await autoAssign(ctx.conversation.id, { reason: "flow hand-off", duringFlow: true, notify: false });
     announced = Boolean(agent); // autoAssign told everyone who has it
   }
+  if (agent) require("./aiAssistant").stop(ctx.conversation.id, "a flow handed it to a person");
   if (agent && !announced) {
     emitToNumber(ctx.numberId, "conversation.assigned", {
       conversationId: ctx.conversation.id, agentId: agent.id, agentUsername: agent.username,

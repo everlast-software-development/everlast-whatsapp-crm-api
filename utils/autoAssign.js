@@ -95,14 +95,16 @@ async function rankAgents(numberId, excludeIds = []) {
  * @param opts.duringFlow  true from the flow's own hand-off (its run is still active)
  * @param opts.notify    false when the caller alerts the agent itself
  */
-function autoAssign(conversationId, { reason = "new chat", duringFlow = false, notify = true } = {}) {
+function autoAssign(conversationId, { reason = "new chat", duringFlow = false, notify = true, note = null } = {}) {
   return oneAtATime(async () => {
     if (!enabled()) return null;
     const conv = await prisma.conversation.findUnique({
       where: { id: conversationId },
-      select: { id: true, whatsappNumberId: true, assignedAgentId: true, status: true, customer: { select: { name: true, phone: true } } },
+      select: { id: true, whatsappNumberId: true, assignedAgentId: true, status: true, aiActiveAt: true, customer: { select: { name: true, phone: true } } },
     });
     if (!conv || conv.assignedAgentId || conv.status === "RESOLVED") return null;
+    // The store's AI is answering it (utils/aiAssistant.js): it hands over when a person is needed.
+    if (conv.aiActiveAt) return null;
     if (!duringFlow && (await prisma.flowRun.count({ where: { conversationId, status: "ACTIVE" } }))) return null;
 
     const not = releasedBy(conversationId);
@@ -126,6 +128,8 @@ function autoAssign(conversationId, { reason = "new chat", duringFlow = false, n
         customerName: conv.customer?.name || null,
         customerPhone: conv.customer?.phone || "",
         reason,
+        // Why it came to them, e.g. the AI's hand-over summary.
+        note,
         at: new Date().toISOString(),
       });
     }
@@ -161,6 +165,7 @@ async function shareBacklog() {
         awaitingReplySince: { not: null },
         lastCustomerMessageAt: { gte: new Date(Date.now() - WINDOW_MS) },
         flowRuns: { none: { status: "ACTIVE" } },
+        aiActiveAt: null,
       },
       orderBy: { awaitingReplySince: "asc" },
       take: online,

@@ -408,6 +408,39 @@ async function receiveTest(m, payload) {
   return answer(200, { provider_message_id: sent?.whatsappMessageId ?? null, test: true, captured: row.id, note: reason });
 }
 
+// ── Calling the store's API ────────────────────────────────────────────────
+
+/**
+ * POST to the store's assistant API (address + key from Templates → Website).
+ * Throws an error with code NOT_CONFIGURED when either is missing.
+ */
+async function storeApi(path, body, { signal, timeout = 15000, lang = "en" } = {}) {
+  const { apiBase, apiKey } = settings();
+  if (!apiBase || !apiKey) {
+    const e = new Error("No store API address or access key (Templates → Website)");
+    e.code = "NOT_CONFIGURED";
+    throw e;
+  }
+  const res = await axios.post(`${apiBase}${path}`, body, {
+    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json", lang },
+    timeout,
+    signal,
+  });
+  return res.data;
+}
+
+// The customer wrote STOP: the store's one WhatsApp switch goes off too, so its
+// own messages stop as well (whatsapp_consent, Level 4). Never throws.
+async function sendStoreConsent(phone, whatsapp) {
+  try {
+    await storeApi("/api/v1/assistant/call/whatsapp_consent", { customer_phone: `+${phone}`, input: { whatsapp } });
+    console.log(`[Store] whatsapp_consent ${whatsapp} sent for a customer`);
+  } catch (err) {
+    if (err.code === "NOT_CONFIGURED") return;
+    logError({ source: "api", message: `The store didn't take a WhatsApp ${whatsapp ? "agree" : "stop"}: ${err.response?.data?.error?.message || err.message}`, error: err });
+  }
+}
+
 // ── Delivery reports back to the store ─────────────────────────────────────
 
 // WhatsApp's final word on a message we sent for the store: "delivered"
@@ -500,5 +533,7 @@ module.exports = {
   receiveStoreMessage,
   noteDelivery,
   reportDelivery,
+  storeApi,
+  sendStoreConsent,
   startStoreJobs,
 };

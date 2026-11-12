@@ -103,7 +103,8 @@ const getOverview = async (req, res, next) => {
     const weekAgo = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
     const [waitingChats, followUpsDue, flowRunsToday, agents, assignedOpen, repliesToday, recentResponses, unreadChats] = await Promise.all([
       prisma.conversation.findMany({
-        where: { ...where, awaitingReplySince: { not: null }, status: { not: "RESOLVED" } },
+        // A chat the store's AI is answering isn't waiting for a person.
+        where: { ...where, awaitingReplySince: { not: null }, status: { not: "RESOLVED" }, aiActiveAt: null },
         select: { id: true, customerId: true, awaitingReplySince: true, assignedAgentId: true },
       }),
       prisma.conversation.count({
@@ -236,6 +237,7 @@ const getConversations = async (req, res, next) => {
     if (filter === "waiting") {
       where.awaitingReplySince = { gte: recentSince };
       where.status = { not: "RESOLVED" };
+      where.aiActiveAt = null;
     } else if (filter === "unread") {
       where.unreadCount = { gt: 0 };
       where.status = { not: "RESOLVED" };

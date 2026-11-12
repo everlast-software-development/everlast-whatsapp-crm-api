@@ -409,6 +409,13 @@ model Conversation {
   whatsappNumber        WhatsAppNumber     @relation(fields: [whatsappNumberId], references: [id])
   assignedAgentId       Int?
   assignedAgent         User?              @relation("AssignedConversations", fields: [assignedAgentId], references: [id])
+  // The store's AI (utils/aiAssistant.js): answering this chat since — set
+  // while it handles a chat nobody owns (automatic assignment waits), cleared
+  // when a person takes it or the AI hands it over.
+  aiActiveAt            DateTime?
+  // When the AI last handed this chat to the team: it stays quiet in it for
+  // the next 24 hours, even if nobody has taken it yet.
+  aiHandedOffAt         DateTime?
   status                ConversationStatus @default(OPEN)
   unreadCount           Int                @default(0)
   lastMessage           String?
@@ -989,6 +996,8 @@ model AiReply {
   whatsappNumberId Int
   inboundMessageId Int?
   replyMessageId   Int?
+  // The store's own conversation id for this chat (its Admin → Assistant chats).
+  externalConversationId Int?
   model            String
   // ANSWERED | HANDED_OFF | URGENT | ERROR
   outcome          String
